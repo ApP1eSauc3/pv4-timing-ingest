@@ -1,21 +1,26 @@
 /**
- * The valid path: apply an update, or record that it was ignored.
+ * The valid path, where an update is either applied or counted as ignored.
  *
- * Rules 1 and 2 (idempotency and ordering) are both enforced by one condition
- * on one write:
+ * Both of the first two rules come down to a single condition on a single write:
  *
  *   attribute_not_exists(#revision) OR #revision < :rev
  *
- * If that condition holds the update is newer information and is applied. If it
- * fails, the stored revision was already at least as new, which is what both a
- * duplicate and a late arrival look like. `status` is never consulted, so a
- * revision 4 PROVISIONAL correctly replaces a revision 3 OFFICIAL when a jury
- * reopens a result.
+ * If that holds, the update is genuinely newer information and it overwrites
+ * what is stored. If it fails, then whatever is already in the table was at
+ * least as new, which is exactly what a duplicate and a late arrival both look
+ * like from here. Ultimately, one line covers two rules, and I think that is the
+ * most interesting thing about this design.
  *
- * `decide()` states the same rule as a pure function and is tested exhaustively,
- * but it is deliberately not called here. Deciding in JavaScript would mean
- * reading before writing, and two Lambdas handling the same bib could then both
- * read revision 3 and both write. Only the store can settle that.
+ * Notice what the condition never mentions: status. That is deliberate, and it
+ * is what allows a revision 4 PROVISIONAL to replace a revision 3 OFFICIAL when
+ * a jury upholds a protest, rather than the system quietly refusing to let a
+ * ratified result be reopened.
+ *
+ * `decide()` says the same thing as a pure function and is tested against every
+ * possible arrival order, but I deliberately do not call it here. Deciding in
+ * JavaScript would mean reading before writing, and two Lambdas handling the
+ * same athlete could then both read revision 3 and both write. Only the database
+ * can settle a race like that, so the database is where the decision lives.
  */
 
 import { TransactionCanceledException, TransactionConflictException } from '@aws-sdk/client-dynamodb';
@@ -24,20 +29,6 @@ import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ddb, eventRegistryKey, resultKey, statsShardKey, TABLE_NAME } from './db';
 import { backoffFor, MAX_ATTEMPTS, RETRYABLE, sleep, withContentionRetry } from './retry';
 import type { TimingUpdate } from './types';
-
-/**
- * Eight attempts, backoff capped at 200 ms, is ~1.2 s worst case. The
- * Lambda times out at 10 s and the HTTP API's integration timeout is 30 s and
- * cannot be raised, so this has to stay well inside that: a timeout returns 5xx
- * without any of the classification below ever running.
- *
- * Three attempts was the first guess and it was not enough. Every update for an
- * event increments the same STATS item, so concurrent updates contend on that
- * one row even when they concern different athletes. Measured: at five requests
- * in flight, three attempts left 20 of 200 updates failing.
- */
-
-
 
 
 export async function applyValid(
@@ -49,10 +40,11 @@ export async function applyValid(
       await ddb.send(new TransactWriteCommand({ TransactItems: buildTransaction(update) }));
       return 'ACCEPTED';
     } catch (error) {
-      // DynamoDB reports contention through TWO different exception types, and
-      // this one is not a cancellation at all: it is raised when the item is
-      // already inside another in-flight transaction. It says nothing about
-      // revisions, so it is retried, never counted.
+      // Something that caught me out: DynamoDB reports contention through two
+      // completely different exception types, and this one is not a cancelled
+      // transaction at all. It is raised when the item is already inside another
+      // in-flight transaction. Either way it tells us nothing about revisions,
+      // so it gets retried and never counted.
       if (error instanceof TransactionConflictException) {
         if (attempt < MAX_ATTEMPTS) {
           await sleep(backoffFor(attempt));
@@ -62,52 +54,54 @@ export async function applyValid(
       }
 
       // Anything that is not a cancelled transaction is an infrastructure
-      // failure. It must never be counted as "ignored" — a failed write recorded
-      // as a domain outcome is a silently wrong number.
+      // problem, not a verdict about this update, so it goes straight up. A
+      // failed write recorded as "ignored" would be a number that looks right
+      // and is wrong, which is the worst outcome available here.
       if (!(error instanceof TransactionCanceledException)) throw error;
 
       const reasons = error.CancellationReasons ?? [];
 
-      // CancellationReasons is positional: [0] is the result update, [1] is the
-      // stats counter, [2] is the event registry. Only [0] carries a condition,
-      // so a failed condition can only appear there. Reading index 0 directly
-      // rather than scanning matters under load — every update touches the same
-      // STATS item, so a scan would sometimes find a conflict at [1] and
-      // mistake it for a stale revision.
+      // CancellationReasons lines up with the items in the order they were
+      // listed: [0] is the result, [1] is the counter, [2] is the registry. The
+      // only condition in this transaction is on the result, so a failed
+      // condition can only ever appear at [0]. Consequently I read that index
+      // directly instead of scanning for the first thing that went wrong -
+      // under load every update touches the counter, so a scan would eventually
+      // pick up a collision there and blame the revision check for it.
       if (reasons[0]?.Code === 'ConditionalCheckFailed') {
         await countIgnored(update.eventId);
         return 'IGNORED';
       }
 
-      // A conflict means two writers touched an item at the same instant. It
-      // says NOTHING about which revision is newer. Treating it as "ignored"
-      // would leave a result stuck at an old revision permanently, which is
-      // exactly the failure this system exists to prevent.
-      // Note the position: a conflict usually appears at index 1, the shared
-      // STATS item, not at index 0. Every update for an event touches that one
-      // row, so it is the most contended item in the table by a wide margin.
+      // A collision just means two writers reached the same row at the same
+      // instant. It says nothing whatsoever about which revision is newer, and
+      // treating it as "ignored" would strand a result at an old revision
+      // permanently - a jury reopening that never reaches the scoreboard, which
+      // is the exact failure this whole system exists to prevent.
       const retryable = reasons.some((reason) => reason.Code && RETRYABLE.has(reason.Code));
       if (retryable && attempt < MAX_ATTEMPTS) {
         await sleep(backoffFor(attempt));
         continue;
       }
 
-      // Out of attempts, or cancelled for a reason we do not understand. Throw,
-      // so the handler returns 5xx and the feed re-sends. Nothing is counted.
+      // Out of attempts, or cancelled for a reason I have not accounted for.
+      // Throwing hands back a 5xx and the feed re-sends, which is the honest
+      // answer: we do not know what happened, so nothing gets counted.
       throw error;
     }
   }
 }
 
 /**
- * All three writes, or none of them. A result can never be applied without
- * being counted, and a crash cannot leave the two disagreeing.
+ * All three writes land together or none of them do. Effectively this means a
+ * result can never be applied without also being counted, and no crash can leave
+ * the stored state and the counters telling different stories.
  */
 function buildTransaction(update: TimingUpdate) {
   const now = new Date().toISOString();
 
-  // Every attribute is aliased. `status` is a DynamoDB reserved word, and
-  // aliasing the rest costs nothing and removes the question entirely.
+  // Every attribute is aliased. `status` has to be, since DynamoDB reserves it,
+  // and aliasing the rest costs nothing while removing the question entirely.
   const names: Record<string, string> = {
     '#bib': 'bib',
     '#lane': 'lane',
@@ -124,9 +118,9 @@ function buildTransaction(update: TimingUpdate) {
     ':status': update.status,
     ':timeMs': update.timeMs,
     ':now': now,
-    // NOTE: no ':one' here. These values belong to the result update, which does
-    // not reference it. DynamoDB rejects the whole transaction if any declared
-    // value is unused by its expression. The stats item declares its own.
+    // No ':one' here, and this one cost me a deploy. These values belong to the
+    // result update, which never references it, and DynamoDB rejects the entire
+    // transaction if a declared value goes unused. The counter declares its own.
   };
 
   const setParts = [
@@ -138,9 +132,10 @@ function buildTransaction(update: TimingUpdate) {
     '#updatedAt = :now',
   ];
 
-  // Stored as received, never validated and never ordered on — the timing
-  // hardware's clock is not trustworthy. Only written when it is actually
-  // present, so the expression never references a value that does not exist.
+  // Stored exactly as it arrived, never validated and never ordered on, because
+  // the brief is clear that the timing hardware's clock cannot be trusted. Only
+  // written when it is actually there, so the expression never points at a value
+  // that does not exist.
   if (update.recordedAt !== undefined) {
     names['#recordedAt'] = 'recordedAt';
     values[':recordedAt'] = update.recordedAt;
@@ -154,7 +149,7 @@ function buildTransaction(update: TimingUpdate) {
         Key: resultKey(update.eventId, update.bib),
         UpdateExpression: `SET ${setParts.join(', ')}`,
 
-        // Rules 1 and 2, in one line. Never looks at status.
+        // Both rules, one line, and no mention of status anywhere in it.
         ConditionExpression: 'attribute_not_exists(#revision) OR #revision < :rev',
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
@@ -169,11 +164,11 @@ function buildTransaction(update: TimingUpdate) {
       },
     },
     {
-      // Update with if_not_exists, never a Put conditional on
-      // attribute_not_exists(PK). A conditional Put fails the whole transaction
-      // on every update after an event's first, and that failure is
-      // indistinguishable from a stale revision — so it would be counted as
-      // "ignored", silently, while a single-update test still passed.
+      // An update with if_not_exists, never a Put conditional on the key not
+      // existing. That version fails the whole transaction on every update after
+      // an event's first, and the failure is indistinguishable from a stale
+      // revision, so it would quietly be counted as "ignored" - while a test
+      // that sends a single update still passes. A nasty one to find later.
       Update: {
         TableName: TABLE_NAME,
         Key: eventRegistryKey(update.eventId),
@@ -185,15 +180,17 @@ function buildTransaction(update: TimingUpdate) {
 }
 
 /**
- * A second call, because the transaction it belongs to has already been
- * cancelled. If the Lambda dies between the two, the feed retries, the condition
- * fails again and the update is counted once. Under a crash with no retry the
- * ignored count is short by one — the concession recorded in DECISIONS.md.
+ * This has to be a second call, since the transaction it would have belonged to
+ * has already been cancelled. If the Lambda dies between the two, the feed
+ * re-sends, the condition fails again and the update still ends up counted once.
+ * The gap is a crash with no re-send at all, where the ignored count comes up
+ * one short - a concession I have written up rather than pretended away.
  *
- * It needs the same retry as the transaction, and for the same reason: it writes
- * to the STATS item, the single most contended row in the table. Measured — with
- * no retry here, 33 of 200 updates failed with a 5xx under only five concurrent
- * requests, even though the transaction above was retrying correctly.
+ * It needs the same retry as the transaction above, for the same reason: it
+ * writes to a counter row that every other update is also writing to. I found
+ * that the hard way. With no retry here, 33 of 200 updates came back as 5xx at
+ * only five concurrent requests, even though the transaction itself was already
+ * retrying perfectly well.
  */
 async function countIgnored(eventId: string): Promise<void> {
   await withContentionRetry(() =>

@@ -1,14 +1,16 @@
 /**
- * The read API: one Lambda behind all four AppSync queries.
+ * The read API: one Lambda sitting behind all four AppSync queries.
  *
- * Chosen over AppSync's JavaScript resolvers deliberately. The rest of this
- * project is TypeScript with tests that run locally; APPSYNC_JS resolvers would
- * have been untyped JavaScript that can only be tested by calling AWS. The
- * shaping this API needs — splitting one Query's results into counters and
- * athletes — is also plain code here and awkward in a resolver template.
+ * I chose this over AppSync's JavaScript resolvers deliberately rather than as a
+ * fallback. Everything else here is TypeScript with tests that run locally in
+ * about a second, whereas APPSYNC_JS resolvers would have been untyped
+ * JavaScript that can only really be tested by calling AWS - the one untested
+ * corner of the project. The shaping this API needs, splitting one Query into
+ * counters and athletes, is also four lines of ordinary code here and an awkward
+ * template there.
  *
- * This function only ever reads. It is granted read-only access to the table,
- * so even a bug cannot change a result.
+ * This function only ever reads, and it is granted read-only access to the
+ * table, so even a bug in it cannot change a result.
  */
 
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
@@ -28,7 +30,8 @@ type ResultShape = {
   timeMs: number;
 };
 
-/** Every page of a partition. `events` grows with the number of events ever seen. */
+/** Every page of a partition. `events` grows with the number of events ever
+ *  seen, so it is the one query here that needs paging at all. */
 async function queryAll(
   keyConditionExpression: string,
   values: Record<string, unknown>,
@@ -59,13 +62,14 @@ export async function handler(
   const eventId = event.arguments?.eventId ?? '';
 
   switch (field) {
-    // Every event ever posted to. Returns [] when there are none — never null.
+    // Every event ever posted to, and an empty list when there are none rather
+    // than a null, since the schema promises a list either way.
     case 'events': {
       const items = await queryAll('PK = :pk', { ':pk': 'EVENTS' });
       return items.map((item) => String(item.SK));
     }
 
-    // One event's athletes. `begins_with` keeps the STATS item out of the list.
+    // One event's athletes, with begins_with keeping the counter rows out of it.
     case 'results': {
       const items = await queryAll('PK = :pk AND begins_with(SK, :bib)', {
         ':pk': `EVENT#${eventId}`,
@@ -73,8 +77,9 @@ export async function handler(
       });
 
       // Only the five fields the contract declares. recordedAt and updatedAt are
-      // stored but deliberately not exposed — recordedAt in particular comes
-      // from a clock we do not trust and must not be used for anything.
+      // stored but deliberately never exposed - recordedAt especially, since it
+      // comes from a clock nobody trusts and putting it on the wire invites
+      // somebody downstream to sort by it.
       return items.map((item) => ({
         bib: String(item.bib),
         lane: Number(item.lane),
@@ -84,23 +89,26 @@ export async function handler(
       }));
     }
 
-    // One Query for both counters and the athlete count — they share a partition.
+    // A single Query covers both the counters and the athlete count, since they
+    // all live in the same partition.
     case 'eventStats': {
       const items = await queryAll('PK = :pk', { ':pk': statsKey(eventId).PK });
       return shapeEventStats(eventId, items);
     }
 
-    // Pipeline-wide, because a corrupt payload may not say which event it was.
+    // Counted across the whole pipeline, because a corrupt payload may well not
+    // say which event it came from.
     case 'updatesRejected': {
-      // Summed across counter shards, like the per-event counters. Items written
-      // before sharding have the plain `STATS` sort key and are included, so no
-      // rejection ever stops being counted.
+      // Added up across the counter rows, exactly like the per-event ones. The
+      // older single-row items are included as well, so nothing that was already
+      // counted ever quietly stops being counted.
       const items = await queryAll('PK = :pk', { ':pk': globalStatsKey().PK });
       return items.reduce((total, item) => total + Number(item.updatesRejected ?? 0), 0);
     }
 
-    // An unknown field means the schema and the resolvers disagree. Returning a
-    // zero would hide that; the contract is automated against, so it should fail.
+    // An unknown field means the schema and the resolvers have drifted apart.
+    // Returning a zero would hide that, and since their harness runs against
+    // this contract, I would much rather it failed loudly here.
     default:
       throw new Error(`unknown field: ${field}`);
   }

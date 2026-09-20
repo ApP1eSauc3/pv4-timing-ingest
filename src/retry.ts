@@ -1,14 +1,15 @@
 /**
- * Retrying contention, in one place.
+ * Retrying collisions, kept in one place.
  *
- * Every write in this system eventually touches a row that other writes are also
- * touching — a per-event counter, or the pipeline-wide rejected counter. Each
- * time one of those was left without a retry it produced 5xx responses under
- * load, three separate times, in three different files. So the policy lives here
- * and every writer uses it.
+ * Every write here eventually touches a row that other writes are also touching,
+ * whether that is a per-event counter or the pipeline-wide rejected counter.
+ * Each time I left one of those without a retry it produced 5xx responses under
+ * load - three separate times, in three different files, before I stopped
+ * patching call sites and moved the policy here where every writer shares it.
  *
- * Contention is never a verdict about revisions. It says only "someone else was
- * touching this row" and the correct response is always to try again.
+ * A collision is never a verdict about revisions. It only ever means "someone
+ * else was touching this row at that moment", and the right answer is always to
+ * wait a moment and try again.
  */
 
 import { TransactionCanceledException, TransactionConflictException } from '@aws-sdk/client-dynamodb';
@@ -17,13 +18,13 @@ export const MAX_ATTEMPTS = 8;
 const BASE_BACKOFF_MS = 25;
 
 /**
- * Capped at 200 ms. Uncapped, eight doublings would reach 3.2 s on the final
- * attempt alone and threaten the Lambda's 10 s timeout — and a timeout returns
- * 5xx without any classification running at all. Capped, the whole sequence is
- * ~1.2 s worst case.
+ * Capped at 200 ms. Left uncapped, eight doublings would reach 3.2 s on the last
+ * attempt alone and start threatening the Lambda's 10 s timeout, and a timeout
+ * hands back a 5xx without any of the classification running at all. Capped, the
+ * whole sequence comes in around 1.2 s at worst.
  *
- * The jitter is not decoration: without it two writers that collide retry in
- * lockstep and collide again.
+ * The jitter is not decoration either. Without it, two writers that collide go
+ * away and come back in lockstep, and collide all over again.
  */
 const BACKOFF_CAP_MS = 200;
 
@@ -32,7 +33,7 @@ export const backoffFor = (attempt: number) =>
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Capacity and contention faults. None of them say anything about revisions. */
+/** Capacity and collision faults. Not one of them says anything about revisions. */
 export const RETRYABLE = new Set([
   'TransactionConflict',
   'ThrottlingError',
@@ -40,9 +41,10 @@ export const RETRYABLE = new Set([
 ]);
 
 /**
- * Contention, however DynamoDB chooses to report it — and it reports it three
- * different ways: as its own exception class, as a reason inside a cancelled
- * transaction, or as a throttling error by name.
+ * A collision, however DynamoDB has chosen to report it this time - and it
+ * reports the same thing three different ways: as its own exception class, as a
+ * reason buried inside a cancelled transaction, or as a throttling error known
+ * only by its name.
  */
 export function isContention(error: unknown): boolean {
   if (error instanceof TransactionConflictException) return true;
@@ -56,9 +58,10 @@ export function isContention(error: unknown): boolean {
 }
 
 /**
- * For writes with no condition on them, where contention is the only thing that
- * can go wrong and there is nothing to classify. Anything else is rethrown
- * immediately — a failed write must never be swallowed.
+ * For writes that carry no condition, where a collision is the only thing that
+ * can really go wrong and there is nothing to classify afterwards. Anything else
+ * is rethrown straight away, because a failed write that gets swallowed here
+ * becomes a wrong number somewhere else.
  */
 export async function withContentionRetry<T>(operation: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
