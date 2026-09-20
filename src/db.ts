@@ -1,9 +1,9 @@
 /**
- * The DynamoDB client, plus every key this table uses.
+ * The DynamoDB client and every key this table uses.
  *
- * Keys live here and nowhere else. The moment one gets written out inline
- * somewhere the two copies start to drift, and the counters stop sharing a
- * partition with the athletes - which is the entire reason this layout works.
+ * Keys live here and nowhere else. Written inline somewhere, the two copies
+ * drift and the counters stop sharing a partition with the athletes, which is
+ * the whole reason this layout works.
  *
  * Layout (one table, on-demand, TTL on `expiresAt`):
  *
@@ -14,10 +14,9 @@
  *   GLOBAL              STATS        updatesRejected
  *   REJECTED            <id>         rawBody, failedChecks, requestId, expiresAt
  *
- * The counters share `EVENT#<eventId>` with every athlete on purpose, so a
- * single Query brings back both at once and `athletesTracked` can be counted
- * from what comes back rather than stored as a second source of truth that would
- * eventually disagree with the first.
+ * The counters share `EVENT#<eventId>` with every athlete on purpose: one Query
+ * returns both, so `athletesTracked` is counted from the rows rather than stored
+ * as a second source of truth that can drift.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -27,14 +26,13 @@ export const TABLE_NAME = process.env.TABLE_NAME ?? '';
 
 export const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: {
-    // recordedAt is optional and frequently absent, and without this the
-    // document client throws on an undefined attribute rather than leaving it
-    // out - which would look like a bug in the transaction, not in the client.
+    // recordedAt is optional and often absent. Without this the document client
+    // throws on an undefined attribute instead of omitting it.
     removeUndefinedValues: true,
   },
 });
 
-/** One athlete's current state inside one event. */
+/** One athlete's current state within one event. */
 export const resultKey = (eventId: string, bib: string) => ({
   PK: `EVENT#${eventId}`,
   SK: `BIB#${bib}`,
@@ -43,29 +41,26 @@ export const resultKey = (eventId: string, bib: string) => ({
 /**
  * Per-event counters, spread across a fixed number of rows.
  *
- * These were a single STATS item until load testing showed me why that does not
- * hold up: every update for an event increments the same row, so updates for
- * completely different athletes still end up colliding on it. Measured against
- * the deployed stack, one row plus six retries still lost about 1% of updates at
- * only five concurrent requests. Spreading the writes fixes that, and the read
- * simply adds them up - still one Query, since they all share the partition.
+ * This was a single STATS item until load testing: every update for an event
+ * increments the same row, so updates for different athletes collide on it.
+ * Measured on the deployed stack, one row plus six retries still lost ~1% of
+ * updates at five concurrent requests. The read adds the rows up, still in one
+ * Query, since they share the partition.
  *
- * Twenty-five rather than ten, and that came from measurement too. Ten left
- * roughly one update in two hundred failing, which matches the arithmetic: with
- * five writers in flight, each attempt on ten rows collides about a third of the
- * time. Twenty-five rows and eight attempts puts it comfortably out of reach.
+ * Twenty-five rather than ten, also from measurement. Ten left ~1 update in 200
+ * failing, matching the arithmetic: five writers on ten rows collide about a
+ * third of the time per attempt. Twenty-five rows and eight attempts clears it.
  */
 export const STATS_SHARDS = 25;
 
-/** Written to. Random rather than hashed on the bib, because hashing would pin
- *  each athlete to one row and a burst for a single athlete - exactly the case
- *  that causes collisions - would all land on it anyway. */
+/** Written to. Random rather than hashed on the bib: hashing pins each athlete
+ *  to one row, so a burst for a single athlete would all land on it anyway. */
 export const statsShardKey = (eventId: string, shard = Math.floor(Math.random() * STATS_SHARDS)) => ({
   PK: `EVENT#${eventId}`,
   SK: `STATS#${shard}`,
 });
 
-/** Read from: the partition that every counter row and every athlete shares. */
+/** Read from: the partition every counter row and every athlete shares. */
 export const statsKey = (eventId: string) => ({
   PK: `EVENT#${eventId}`,
   SK: 'STATS',
@@ -81,11 +76,9 @@ export const eventRegistryKey = (eventId: string) => ({
  * Pipeline-wide counters. `updatesRejected` is not per event because a corrupt
  * payload may not say which event it belonged to — or anything else.
  *
- * Spread for the same reason as the per-event counters, and this one is the
- * busier of the two: every rejection anywhere in the pipeline increments it,
- * whatever event it came from. On one row and with no retry it was the last
- * remaining source of 5xx responses under load, which took me three rounds of
- * looking in the wrong place to find.
+ * Spread for the same reason as the per-event counters, and busier: every
+ * rejection in the pipeline increments it, whatever event it came from. On one
+ * row with no retry it was the last remaining source of 5xx under load.
  */
 export const globalStatsShardKey = (shard = Math.floor(Math.random() * STATS_SHARDS)) => ({
   PK: 'GLOBAL',
@@ -98,8 +91,8 @@ export const globalStatsKey = () => ({
   SK: 'STATS',
 });
 
-/** One stored corrupt payload. The sort key is time ordered, so these read back
- *  in the order they arrived. */
+/** One stored corrupt payload. Time-ordered sort key, so these read back in
+ *  arrival order. */
 export const rejectionKey = (id: string) => ({
   PK: 'REJECTED',
   SK: id,

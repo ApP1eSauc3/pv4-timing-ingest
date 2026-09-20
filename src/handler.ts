@@ -1,18 +1,17 @@
 /**
- * The ingest Lambda, sitting behind POST /timing.
+ * The ingest Lambda, behind POST /timing.
  *
- * The order here is deliberate and never changes:
+ * The order is deliberate and never changes:
  *
  *   decode -> size check -> parse -> validate -> write
  *
- * Nothing reaches DynamoDB until validation has passed, which is what stops a
- * corrupt payload from creating a phantom athlete who was never in the race.
+ * Nothing reaches DynamoDB until validation passes, so a corrupt payload cannot
+ * create a phantom athlete who was never in the race.
  *
- * Every update that gets this far lands in exactly one of three buckets:
- * accepted, ignored or rejected. A 5xx is not a fourth bucket. It means we
- * genuinely do not know what happened, so nothing is counted and the feed
- * re-sends. Consequently an infrastructure failure has to throw rather than be
- * quietly filed as "ignored", which would balance the books with a wrong number.
+ * Every update that gets this far lands in exactly one of accepted, ignored or
+ * rejected. A 5xx is not a fourth bucket - it means we do not know what
+ * happened, nothing is counted, and the feed re-sends. So an infrastructure
+ * failure throws rather than being filed as "ignored".
  */
 
 import { Logger } from '@aws-lambda-powertools/logger';
@@ -26,13 +25,12 @@ import { validateBody } from './validate';
 const logger = new Logger({ serviceName: 'pv4-ingest' });
 
 /**
- * Metrics go out as EMF inside the logs, so publishing them costs nothing extra.
+ * Metrics go out as EMF in the logs, so they cost nothing extra to publish.
  *
- * Deliberately with no per-event or per-athlete dimensions. CloudWatch charges
- * per unique combination of metric and dimension values, so breaking these down
- * by something unbounded like a bib turns a free metric into a bill that grows
- * with the meet. Those details are already in the log fields below, where they
- * can be searched without being charged for per distinct value.
+ * No per-event or per-athlete dimensions. CloudWatch charges per unique
+ * combination of metric and dimension values, so an unbounded dimension like a
+ * bib turns a free metric into a growing bill. Those stay in the log fields,
+ * where they can be searched without being charged per distinct value.
  */
 const metrics = new Metrics({ namespace: 'PV4/Timing', serviceName: 'pv4-ingest' });
 
@@ -43,17 +41,16 @@ const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
 });
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
-  // Cleared per invocation, otherwise a warm container carries the previous
-  // request's numbers into this one and the metric quietly double counts.
+  // Cleared per invocation: a warm container would otherwise carry the previous
+  // request's numbers into this one.
   metrics.clearMetrics();
 
-  // The HTTP API always sets this. The fallback only exists for a hand-made test
-  // invocation that arrives with no request context attached.
+  // The HTTP API always sets this. The fallback is for a hand-made test
+  // invocation with no request context.
   const requestId = event.requestContext?.requestId ?? 'unknown';
 
-  // API Gateway base64 encodes anything it treats as binary, and validating the
-  // encoded string would reject every one of those as corrupt when they are
-  // perfectly good updates.
+  // API Gateway base64-encodes anything it treats as binary. Validating the
+  // encoded string would reject those as corrupt.
   const rawBody =
     event.isBase64Encoded && event.body
       ? Buffer.from(event.body, 'base64').toString('utf8')
@@ -62,9 +59,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   const validation = validateBody(rawBody);
 
   if (!validation.valid) {
-    // Rejections are counted across the whole pipeline rather than per event,
-    // since a corrupt payload may not tell us which event it belonged to - or
-    // anything else about itself.
+    // Counted pipeline-wide, not per event: a corrupt payload may not say which
+    // event it belonged to.
     await storeRejection(rawBody, validation.failedChecks, requestId);
 
     logger.warn('update rejected', {
@@ -82,9 +78,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   const { eventId, bib, revision, status } = validation.update;
 
   // Logged per call rather than with appendKeys. Persistent keys survive a warm
-  // invocation, so a later request for a different athlete would arrive carrying
-  // this one's bib, and a trace that confidently points at the wrong athlete is
-  // worse than no trace at all.
+  // invocation, so a later request for a different athlete would carry this
+  // one's bib - a trace pointing at the wrong athlete is worse than none.
   const context = { requestId, eventId, bib, revision, status };
 
   const outcome = await applyValid(validation.update, requestId);

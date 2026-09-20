@@ -1,21 +1,17 @@
 /**
- * Ordering and idempotency, which turn out to be the same rule.
+ * Ordering and idempotency, which are the same rule.
  *
- * This is that rule written twice, on purpose. DynamoDB enforces it with a
- * condition on the write:
+ * The rule written twice, on purpose. DynamoDB enforces it on the write:
  *
  *   attribute_not_exists(revision) OR revision < :rev
  *
- * and this function says the same thing in plain code. Both earn their place.
- * Only the database can settle things when two Lambdas write the same athlete at
- * the same instant, and only a pure function can be tested against every
- * possible arrival order, which is what the tests do.
+ * This function says the same thing in plain code. Both earn their place: only
+ * the database can settle two Lambdas writing the same athlete at once, and only
+ * a pure function can be tested against every arrival order.
  *
- * The rule itself: a higher revision always wins. Status has nothing to do with
- * it, which is why it is not a parameter here and should never become one. That
- * is precisely what lets a jury reopen a result - revision 4 PROVISIONAL beats
- * revision 3 OFFICIAL and the scoreboard goes back to provisional, which is what
- * the stadium needs to see.
+ * The rule: a higher revision always wins. Status has nothing to do with it and
+ * is not a parameter here. That is what lets a jury reopen a result - revision 4
+ * PROVISIONAL beats revision 3 OFFICIAL.
  */
 
 export type Decision = 'APPLY' | 'IGNORE';
@@ -24,8 +20,7 @@ export function decide(storedRevision: number | undefined, incomingRevision: num
   // Never seen this athlete before, so there is nothing to compare against yet.
   if (storedRevision === undefined) return 'APPLY';
 
-  // Strictly greater, nothing else. Equal means a duplicate turned up, lower
-  // means an old update arrived late, and neither is new information - so the
-  // same comparison handles both without needing a separate case for either.
+  // Strictly greater. Equal is a duplicate, lower is a late arrival, and
+  // neither is new information - one comparison handles both.
   return incomingRevision > storedRevision ? 'APPLY' : 'IGNORE';
 }

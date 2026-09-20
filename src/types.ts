@@ -2,15 +2,14 @@
  * Shared types for the timing processor.
  *
  * recordedAt is carried through and stored, but never validated and never used
- * to order anything, since it comes from timing hardware whose clock the brief
- * tells us not to trust.
+ * for ordering: it comes from timing hardware whose clock is not trustworthy.
  */
 
 export const RESULT_STATUSES = ['PROVISIONAL', 'CONFIRMED', 'OFFICIAL'] as const;
 
 export type ResultStatus = (typeof RESULT_STATUSES)[number];
 
-/** A timing update that has already passed every validation check. */
+/** A timing update that has passed every validation check. */
 export type TimingUpdate = {
   eventId: string;
   bib: string;
@@ -21,8 +20,8 @@ export type TimingUpdate = {
   recordedAt?: unknown;
 };
 
-/** The name of one validation rule. These get stored on a rejection so that the
- *  rejection explains itself later without anyone having to guess. */
+/** The name of one validation rule, stored on a rejection so it explains
+ *  itself later. */
 export type CheckName =
   | 'body_withinSizeLimit'
   | 'body_isJson'
@@ -38,12 +37,12 @@ export type ValidationResult =
   | { valid: true; update: TimingUpdate }
   | { valid: false; failedChecks: CheckName[] };
 
-/** What the processor did with an update. Every update lands in exactly one of
- *  these, which is the invariant the whole design is built around. */
+/** What the processor did with an update. Every update lands in exactly one -
+ *  the invariant this design is built around. */
 export type Outcome = 'ACCEPTED' | 'IGNORED' | 'REJECTED';
 
-/** What eventStats hands back. Every field is non-null in the schema, so every
- *  one of these has to be a real number even when nothing has happened yet. */
+/** What eventStats returns. Every field is non-null in the schema, so each is a
+ *  real number even when nothing has happened yet. */
 export type EventStatsShape = {
   eventId: string;
   athletesTracked: number;

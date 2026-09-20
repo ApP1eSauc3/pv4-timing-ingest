@@ -1,15 +1,14 @@
 /**
  * The storage half of validation.
  *
- * The brief is specific that a corrupt payload must not vanish silently - we
- * should be able to tell it happened and get at the payload afterwards. So the
- * rejection record and the counter go into one transaction. Written separately
- * they could disagree, leaving either a stored payload nobody counted or a count
- * with no payload behind it, and at that point neither number means anything.
+ * A corrupt payload must not vanish silently: we should be able to tell it
+ * happened and get at the payload afterwards. So the rejection record and the
+ * counter go in one transaction. Written separately they could disagree - a
+ * stored payload nobody counted, or a count with no payload - and then neither
+ * number can be trusted.
  *
  * Neither write carries a condition, so there is no accepted-versus-ignored
- * decision to make here. That is why this path stays simple while the valid one
- * in applyValid.ts does not.
+ * decision here. That is why this path is simple and applyValid.ts is not.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -20,13 +19,12 @@ import { withContentionRetry } from './retry';
 import type { CheckName } from './types';
 
 /**
- * DynamoDB caps an item at 400 KB, so this leaves room for everything else on
- * the record rather than filling it to the limit and then failing on metadata.
+ * DynamoDB caps an item at 400 KB. This leaves room for the rest of the record
+ * rather than filling to the limit and failing on the metadata.
  */
 const MAX_STORED_BODY_CHARS = 300 * 1024;
 
-/** Corrupt payloads are evidence rather than records, and a week is plenty of
- *  time to go and look at one. */
+/** Corrupt payloads are evidence, not records. A week is long enough to debug. */
 const REJECTION_TTL_DAYS = 7;
 
 export async function storeRejection(
@@ -35,15 +33,15 @@ export async function storeRejection(
   requestId: string,
 ): Promise<void> {
   const receivedAt = new Date().toISOString();
-  // An empty body and no body at all are both corrupt, but they are different
-  // faults and the record ought to say which one turned up.
+  // An empty body and no body are both corrupt, but they are different faults
+  // and the record should say which.
   const bodyMissing = rawBody == null;
   const body = rawBody ?? '';
   const truncated = body.length > MAX_STORED_BODY_CHARS;
 
-  // Retried like every other write that touches a shared counter. Without it,
-  // this path was the last thing still producing 5xx responses under load, since
-  // every rejection in the pipeline increments the very same counter.
+  // Retried like every other write to a shared counter. Without it, this path
+  // was the last source of 5xx under load: every rejection in the pipeline
+  // increments the same counter.
   await withContentionRetry(() =>
     ddb.send(
       new TransactWriteCommand({
@@ -52,9 +50,8 @@ export async function storeRejection(
           Put: {
             TableName: TABLE_NAME,
             Item: {
-              // Time prefixed so these read back in arrival order, with a uuid
-              // on the end so two arriving in the same millisecond cannot
-              // overwrite one another.
+              // Time-prefixed so these read back in arrival order, with a uuid
+              // so two in the same millisecond cannot collide.
               ...rejectionKey(`${receivedAt}#${randomUUID()}`),
               rawBody: truncated ? body.slice(0, MAX_STORED_BODY_CHARS) : body,
               truncated,
