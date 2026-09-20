@@ -1,0 +1,1330 @@
+{
+  "Resources": {
+    "TimingTable8FD4D931": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S"
+          }
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE"
+          }
+        ],
+        "TableName": "pv4-timing",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true
+        }
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "IngestLogGroup131E2484": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/pv4-ingest",
+        "RetentionInDays": 7,
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "IngestFunctionServiceRole55EB4427": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+              ]
+            ]
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "IngestFunctionServiceRoleDefaultPolicy8EB1E4A7": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TimingTable8FD4D931",
+                    "Arn"
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TimingTable8FD4D931",
+                    "Arn"
+                  ]
+                }
+              ]
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "IngestFunctionServiceRoleDefaultPolicy8EB1E4A7",
+        "Roles": [
+          {
+            "Ref": "IngestFunctionServiceRole55EB4427"
+          }
+        ]
+      }
+    },
+    "IngestFunction4B2F2EB2": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": "<assets-bucket>",
+          "S3Key": "<asset>.zip"
+        },
+        "Environment": {
+          "Variables": {
+            "TABLE_NAME": {
+              "Ref": "TimingTable8FD4D931"
+            },
+            "POWERTOOLS_SERVICE_NAME": "pv4-ingest",
+            "POWERTOOLS_LOG_LEVEL": "INFO",
+            "POWERTOOLS_METRICS_NAMESPACE": "PV4/Timing"
+          }
+        },
+        "FunctionName": "pv4-ingest",
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "IngestLogGroup131E2484"
+          }
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "IngestFunctionServiceRole55EB4427",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs22.x",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "Timeout": 10
+      },
+      "DependsOn": [
+        "IngestFunctionServiceRoleDefaultPolicy8EB1E4A7",
+        "IngestFunctionServiceRole55EB4427"
+      ]
+    },
+    "IngestApi90DC3F9D": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Description": "PV4 timing ingest — POST /timing",
+        "Name": "pv4-ingest-api",
+        "ProtocolType": "HTTP",
+        "Tags": {
+          "project": "pv4"
+        }
+      }
+    },
+    "IngestApiDefaultStage4F9A3A6A": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "Properties": {
+        "ApiId": {
+          "Ref": "IngestApi90DC3F9D"
+        },
+        "AutoDeploy": true,
+        "StageName": "$default",
+        "Tags": {
+          "project": "pv4"
+        }
+      }
+    },
+    "IngestApiPOSTtimingIngestIntegration05A48376": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "IngestApi90DC3F9D"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "IngestFunction4B2F2EB2",
+            "Arn"
+          ]
+        },
+        "PayloadFormatVersion": "2.0"
+      }
+    },
+    "IngestApiPOSTtimingIngestIntegrationPermissionC9503464": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "IngestFunction4B2F2EB2",
+            "Arn"
+          ]
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition"
+              },
+              ":execute-api:ap-southeast-2:000000000000:",
+              {
+                "Ref": "IngestApi90DC3F9D"
+              },
+              "/*/*/timing"
+            ]
+          ]
+        }
+      }
+    },
+    "IngestApiPOSTtiming4DEB5866": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "IngestApi90DC3F9D"
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /timing",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "IngestApiPOSTtimingIngestIntegration05A48376"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "QueryLogGroup129F354A": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/pv4-query",
+        "RetentionInDays": 7,
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "QueryFunctionServiceRoleF5EB059D": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+              ]
+            ]
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "QueryFunctionServiceRoleDefaultPolicyF63D0CC9": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:DescribeTable"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TimingTable8FD4D931",
+                    "Arn"
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TimingTable8FD4D931",
+                    "Arn"
+                  ]
+                }
+              ]
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "QueryFunctionServiceRoleDefaultPolicyF63D0CC9",
+        "Roles": [
+          {
+            "Ref": "QueryFunctionServiceRoleF5EB059D"
+          }
+        ]
+      }
+    },
+    "QueryFunctionBDF4DE5B": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": "<assets-bucket>",
+          "S3Key": "<asset>.zip"
+        },
+        "Environment": {
+          "Variables": {
+            "TABLE_NAME": {
+              "Ref": "TimingTable8FD4D931"
+            }
+          }
+        },
+        "FunctionName": "pv4-query",
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "QueryLogGroup129F354A"
+          }
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "QueryFunctionServiceRoleF5EB059D",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs22.x",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "Timeout": 10
+      },
+      "DependsOn": [
+        "QueryFunctionServiceRoleDefaultPolicyF63D0CC9",
+        "QueryFunctionServiceRoleF5EB059D"
+      ]
+    },
+    "ResultsApi4893B484": {
+      "Type": "AWS::AppSync::GraphQLApi",
+      "Properties": {
+        "AuthenticationType": "API_KEY",
+        "Name": "pv4-results-api",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "ResultsApiSchema7544711C": {
+      "Type": "AWS::AppSync::GraphQLSchema",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "Definition": "# The read contract, exactly as the brief specifies it. An automated harness runs\n# against this, so these types are fixed: additions alongside them are fine,\n# changes are not.\n\nenum ResultStatus { PROVISIONAL CONFIRMED OFFICIAL }\n\ntype Result {\n  bib:      ID!\n  lane:     Int!\n  revision: Int!\n  status:   ResultStatus!\n  timeMs:   Int!\n}\n\ntype EventStats {\n  eventId:         ID!\n  athletesTracked: Int!   # distinct bibs with stored state\n  updatesAccepted: Int!   # updates that changed stored state\n  updatesIgnored:  Int!   # valid, but not applied — duplicate or stale revision\n}\n\ntype Query {\n  events:                   [ID!]!\n  results(eventId: ID!):    [Result!]!\n  eventStats(eventId: ID!): EventStats!\n  updatesRejected:          Int!   # failed validation, pipeline-wide\n}\n"
+      }
+    },
+    "ResultsApiDefaultApiKeyBAEC2934": {
+      "Type": "AWS::AppSync::ApiKey",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "Description": "pv4 results — read only",
+        "Expires": "<epoch>"
+      },
+      "DependsOn": [
+        "ResultsApiSchema7544711C"
+      ]
+    },
+    "ResultsApiQueryDataSourceServiceRoleE92DE54E": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "appsync.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "ResultsApiQueryDataSourceServiceRoleDefaultPolicyF0B27BAA": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "QueryFunctionBDF4DE5B",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "QueryFunctionBDF4DE5B",
+                          "Arn"
+                        ]
+                      },
+                      ":*"
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "ResultsApiQueryDataSourceServiceRoleDefaultPolicyF0B27BAA",
+        "Roles": [
+          {
+            "Ref": "ResultsApiQueryDataSourceServiceRoleE92DE54E"
+          }
+        ]
+      }
+    },
+    "ResultsApiQueryDataSource60074408": {
+      "Type": "AWS::AppSync::DataSource",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "LambdaConfig": {
+          "LambdaFunctionArn": {
+            "Fn::GetAtt": [
+              "QueryFunctionBDF4DE5B",
+              "Arn"
+            ]
+          }
+        },
+        "Name": "QueryDataSource",
+        "ServiceRoleArn": {
+          "Fn::GetAtt": [
+            "ResultsApiQueryDataSourceServiceRoleE92DE54E",
+            "Arn"
+          ]
+        },
+        "Type": "AWS_LAMBDA"
+      }
+    },
+    "ResultsApieventsResolver43547A26": {
+      "Type": "AWS::AppSync::Resolver",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "DataSourceName": "QueryDataSource",
+        "FieldName": "events",
+        "Kind": "UNIT",
+        "TypeName": "Query"
+      },
+      "DependsOn": [
+        "ResultsApiQueryDataSource60074408",
+        "ResultsApiSchema7544711C"
+      ]
+    },
+    "ResultsApiresultsResolver0B63F1C8": {
+      "Type": "AWS::AppSync::Resolver",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "DataSourceName": "QueryDataSource",
+        "FieldName": "results",
+        "Kind": "UNIT",
+        "TypeName": "Query"
+      },
+      "DependsOn": [
+        "ResultsApiQueryDataSource60074408",
+        "ResultsApiSchema7544711C"
+      ]
+    },
+    "ResultsApieventStatsResolver015642E3": {
+      "Type": "AWS::AppSync::Resolver",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "DataSourceName": "QueryDataSource",
+        "FieldName": "eventStats",
+        "Kind": "UNIT",
+        "TypeName": "Query"
+      },
+      "DependsOn": [
+        "ResultsApiQueryDataSource60074408",
+        "ResultsApiSchema7544711C"
+      ]
+    },
+    "ResultsApiupdatesRejectedResolverAF3DAFAD": {
+      "Type": "AWS::AppSync::Resolver",
+      "Properties": {
+        "ApiId": {
+          "Fn::GetAtt": [
+            "ResultsApi4893B484",
+            "ApiId"
+          ]
+        },
+        "DataSourceName": "QueryDataSource",
+        "FieldName": "updatesRejected",
+        "Kind": "UNIT",
+        "TypeName": "Query"
+      },
+      "DependsOn": [
+        "ResultsApiQueryDataSource60074408",
+        "ResultsApiSchema7544711C"
+      ]
+    },
+    "SiteBucket397A1860": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "BucketName": "pv4-results-000000000000",
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "Tags": [
+          {
+            "Key": "aws-cdk:auto-delete-objects",
+            "Value": "true"
+          },
+          {
+            "Key": "aws-cdk:cr-owned:f7053754",
+            "Value": "true"
+          },
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "SiteBucketPolicy3AC1D0F8": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "SiteBucket397A1860"
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*"
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SiteBucket397A1860",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SiteBucket397A1860",
+                          "Arn"
+                        ]
+                      },
+                      "/*"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": [
+                "s3:PutBucketPolicy",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092",
+                    "Arn"
+                  ]
+                }
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SiteBucket397A1860",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SiteBucket397A1860",
+                          "Arn"
+                        ]
+                      },
+                      "/*"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": "s3:GetObject",
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition"
+                        },
+                        ":cloudfront::",
+                        {
+                          "Ref": "AWS::AccountId"
+                        },
+                        ":distribution/",
+                        {
+                          "Ref": "SiteDistribution3FF9535D"
+                        }
+                      ]
+                    ]
+                  }
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudfront.amazonaws.com"
+              },
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "SiteBucket397A1860",
+                        "Arn"
+                      ]
+                    },
+                    "/*"
+                  ]
+                ]
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        }
+      }
+    },
+    "SiteBucketAutoDeleteObjectsCustomResource9585E968": {
+      "Type": "Custom::S3AutoDeleteObjects",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F",
+            "Arn"
+          ]
+        },
+        "BucketName": {
+          "Ref": "SiteBucket397A1860"
+        }
+      },
+      "DependsOn": [
+        "SiteBucketPolicy3AC1D0F8"
+      ],
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              }
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          }
+        ]
+      }
+    },
+    "CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": "<assets-bucket>",
+          "S3Key": "<asset>.zip"
+        },
+        "Timeout": 900,
+        "MemorySize": 128,
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs24.x",
+        "Description": {
+          "Fn::Join": [
+            "",
+            [
+              "Lambda function for auto-deleting objects in ",
+              {
+                "Ref": "SiteBucket397A1860"
+              },
+              " S3 bucket."
+            ]
+          ]
+        }
+      },
+      "DependsOn": [
+        "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092"
+      ]
+    },
+    "SiteDistributionOrigin1S3OriginAccessControl7D960FE6": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": "Pv4TimingStackSiteDistributiOrigin1S3OriginAccessControl51288D15",
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "SiteDistribution3FF9535D": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": "pv4 results page",
+          "DefaultCacheBehavior": {
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+            "Compress": true,
+            "TargetOriginId": "Pv4TimingStackSiteDistributionOrigin144432276",
+            "ViewerProtocolPolicy": "redirect-to-https"
+          },
+          "DefaultRootObject": "index.html",
+          "Enabled": true,
+          "HttpVersion": "http2",
+          "IPV6Enabled": true,
+          "Origins": [
+            {
+              "DomainName": {
+                "Fn::GetAtt": [
+                  "SiteBucket397A1860",
+                  "RegionalDomainName"
+                ]
+              },
+              "Id": "Pv4TimingStackSiteDistributionOrigin144432276",
+              "OriginAccessControlId": {
+                "Fn::GetAtt": [
+                  "SiteDistributionOrigin1S3OriginAccessControl7D960FE6",
+                  "Id"
+                ]
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "SiteDeploymentAwsCliLayerADBDEF4E": {
+      "Type": "AWS::Lambda::LayerVersion",
+      "Properties": {
+        "Content": {
+          "S3Bucket": "<assets-bucket>",
+          "S3Key": "<asset>.zip"
+        },
+        "Description": "/opt/awscli/aws"
+      }
+    },
+    "SiteDeploymentCustomResource42D55606": {
+      "Type": "Custom::CDKBucketDeployment",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C81C01536",
+            "Arn"
+          ]
+        },
+        "SourceBucketNames": [
+          "<assets-bucket>",
+          "<assets-bucket>"
+        ],
+        "SourceObjectKeys": [
+          "<asset>.zip",
+          "<asset>.zip"
+        ],
+        "SourceMarkers": [
+          {},
+          {
+            "<<marker:0xbaba:0>>": {
+              "Fn::Join": [
+                "",
+                [
+                  "\"",
+                  {
+                    "Fn::GetAtt": [
+                      "ResultsApi4893B484",
+                      "GraphQLUrl"
+                    ]
+                  },
+                  "\""
+                ]
+              ]
+            },
+            "<<marker:0xbaba:1>>": {
+              "Fn::Join": [
+                "",
+                [
+                  "\"",
+                  {
+                    "Fn::GetAtt": [
+                      "ResultsApiDefaultApiKeyBAEC2934",
+                      "ApiKey"
+                    ]
+                  },
+                  "\""
+                ]
+              ]
+            }
+          }
+        ],
+        "SourceMarkersConfig": [
+          {},
+          {}
+        ],
+        "DestinationBucketName": {
+          "Ref": "SiteBucket397A1860"
+        },
+        "WaitForDistributionInvalidation": true,
+        "Prune": true,
+        "DistributionId": {
+          "Ref": "SiteDistribution3FF9535D"
+        },
+        "DistributionPaths": [
+          "/*"
+        ],
+        "OutputObjectKeys": true
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete"
+    },
+    "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+              ]
+            ]
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ]
+      }
+    },
+    "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":s3:::<assets-bucket>"
+                    ]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":s3:::<assets-bucket>/*"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SiteBucket397A1860",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SiteBucket397A1860",
+                          "Arn"
+                        ]
+                      },
+                      "/*"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "Action": [
+                "cloudfront:GetInvalidation",
+                "cloudfront:CreateInvalidation"
+              ],
+              "Effect": "Allow",
+              "Resource": "*"
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF",
+        "Roles": [
+          {
+            "Ref": "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265"
+          }
+        ]
+      }
+    },
+    "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C81C01536": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Architectures": [
+          "arm64"
+        ],
+        "Code": {
+          "S3Bucket": "<assets-bucket>",
+          "S3Key": "<asset>.zip"
+        },
+        "Environment": {
+          "Variables": {
+            "AWS_CA_BUNDLE": "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+          }
+        },
+        "Handler": "index.handler",
+        "Layers": [
+          {
+            "Ref": "SiteDeploymentAwsCliLayerADBDEF4E"
+          }
+        ],
+        "MemorySize": 1024,
+        "Role": {
+          "Fn::GetAtt": [
+            "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265",
+            "Arn"
+          ]
+        },
+        "Runtime": "python3.13",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "Timeout": 900
+      },
+      "DependsOn": [
+        "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF",
+        "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265"
+      ]
+    },
+    "AlarmTopicD01E77F9": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "DisplayName": "PV4 timing alarms",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "TopicName": "pv4-alarms"
+      }
+    },
+    "IngestErrorAlarm8D1F3E9F": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9"
+          }
+        ],
+        "AlarmDescription": "The ingest Lambda threw. An update reached the processor and landed in none of accepted, ignored or rejected.",
+        "AlarmName": "pv4-ingest-errors",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "IngestFunction4B2F2EB2"
+            }
+          }
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 60,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching"
+      }
+    }
+  },
+  "Outputs": {
+    "IngestUrl": {
+      "Description": "POST timing updates here",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "IngestApi90DC3F9D",
+                "ApiEndpoint"
+              ]
+            },
+            "/timing"
+          ]
+        ]
+      }
+    },
+    "GraphqlUrl": {
+      "Description": "AppSync GraphQL endpoint",
+      "Value": {
+        "Fn::GetAtt": [
+          "ResultsApi4893B484",
+          "GraphQLUrl"
+        ]
+      }
+    },
+    "GraphqlApiKey": {
+      "Description": "AppSync API key — meant to be shared, expires in 365 days",
+      "Value": {
+        "Fn::GetAtt": [
+          "ResultsApiDefaultApiKeyBAEC2934",
+          "ApiKey"
+        ]
+      }
+    },
+    "ResultsPageUrl": {
+      "Description": "CloudFront results page",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Fn::GetAtt": [
+                "SiteDistribution3FF9535D",
+                "DomainName"
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    "TableName": {
+      "Value": {
+        "Ref": "TimingTable8FD4D931"
+      }
+    }
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Type": "AWS::SSM::Parameter::Value<String>",
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]"
+    }
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5"
+                  ],
+                  {
+                    "Ref": "BootstrapVersion"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+        }
+      ]
+    }
+  }
+}
