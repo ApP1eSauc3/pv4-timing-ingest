@@ -38,7 +38,31 @@ export const resultKey = (eventId: string, bib: string) => ({
   SK: `BIB#${bib}`,
 });
 
-/** Per-event counters. Same partition as the athletes above. */
+/**
+ * Per-event counters, spread across a fixed number of shards.
+ *
+ * They were a single `STATS` item until load testing showed why that does not
+ * work: every update for an event increments the same row, so updates for
+ * *different athletes* still collide on it. Measured on the deployed stack, one
+ * item plus six retries still failed ~1% of updates at only five concurrent
+ * requests. Sharding spreads those writes; the read sums them, which is still
+ * one Query because they share the partition.
+ *
+ * Twenty-five rather than ten, from measurement: ten left roughly one update in
+ * two hundred still failing, which matches the collision arithmetic — with five
+ * writers in flight, each attempt on ten shards collides about a third of the
+ * time. Twenty-five shards and eight attempts puts it out of reach.
+ */
+export const STATS_SHARDS = 25;
+
+/** Written to. Random rather than hashed on bib: a burst for one athlete would
+ *  otherwise still land on one shard, which is exactly the conflict case. */
+export const statsShardKey = (eventId: string, shard = Math.floor(Math.random() * STATS_SHARDS)) => ({
+  PK: `EVENT#${eventId}`,
+  SK: `STATS#${shard}`,
+});
+
+/** Read from: the partition every counter shard and every athlete shares. */
 export const statsKey = (eventId: string) => ({
   PK: `EVENT#${eventId}`,
   SK: 'STATS',

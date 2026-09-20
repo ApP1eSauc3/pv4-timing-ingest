@@ -19,13 +19,21 @@ import type { EventStatsShape } from './types';
 type Item = Record<string, unknown>;
 
 export function shapeEventStats(eventId: string, items: Item[]): EventStatsShape {
-  const stats = items.find((item) => item.SK === 'STATS');
-  const athletes = items.filter((item) => typeof item.SK === 'string' && item.SK.startsWith('BIB#'));
+  const sk = (item: Item) => (typeof item.SK === 'string' ? item.SK : '');
+
+  // Counters live in shards (`STATS#0`..`STATS#9`) so concurrent updates do not
+  // all collide on one row. `STATS` without a suffix is also matched: events
+  // written before sharding still read correctly.
+  const counters = items.filter((item) => sk(item).startsWith('STATS'));
+  const athletes = items.filter((item) => sk(item).startsWith('BIB#'));
+
+  const sum = (field: string) =>
+    counters.reduce((total, item) => total + Number(item[field] ?? 0), 0);
 
   return {
     eventId,
     athletesTracked: athletes.length,
-    updatesAccepted: Number(stats?.updatesAccepted ?? 0),
-    updatesIgnored: Number(stats?.updatesIgnored ?? 0),
+    updatesAccepted: sum('updatesAccepted'),
+    updatesIgnored: sum('updatesIgnored'),
   };
 }

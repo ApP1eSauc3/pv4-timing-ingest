@@ -18,22 +18,39 @@
  * read revision 3 and both write. Only the store can settle that.
  */
 
-import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { TransactionCanceledException, TransactionConflictException } from '@aws-sdk/client-dynamodb';
 import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
-import { ddb, eventRegistryKey, resultKey, statsKey, TABLE_NAME } from './db';
+import { ddb, eventRegistryKey, resultKey, statsShardKey, TABLE_NAME } from './db';
 import type { TimingUpdate } from './types';
 
 /**
- * Three attempts of 50/100/200 ms plus jitter is ~350 ms worst case. The Lambda
- * times out at 10 s and the HTTP API's integration timeout is 30 s and cannot be
- * raised, so this has to stay small: a timeout returns 5xx without any of the
- * classification below ever running.
+ * Eight attempts, backoff capped at 200 ms, is ~1.2 s worst case. The
+ * Lambda times out at 10 s and the HTTP API's integration timeout is 30 s and
+ * cannot be raised, so this has to stay well inside that: a timeout returns 5xx
+ * without any of the classification below ever running.
+ *
+ * Three attempts was the first guess and it was not enough. Every update for an
+ * event increments the same STATS item, so concurrent updates contend on that
+ * one row even when they concern different athletes. Measured: at five requests
+ * in flight, three attempts left 20 of 200 updates failing.
  */
-const MAX_ATTEMPTS = 3;
-const BASE_BACKOFF_MS = 50;
+const MAX_ATTEMPTS = 8;
+const BASE_BACKOFF_MS = 25;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Exponential with jitter, capped. The cap matters: doubling unchecked, eight
+ * attempts would reach 3.2 s on the last one alone and risk the Lambda's 10 s
+ * timeout. Capped at 200 ms the whole sequence is ~1.2 s worst case.
+ *
+ * Jitter is not decoration — without it, two writers that collide retry in
+ * lockstep and collide again.
+ */
+const BACKOFF_CAP_MS = 200;
+const backoffFor = (attempt: number) =>
+  Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS) + Math.random() * BASE_BACKOFF_MS;
 
 /** Capacity and contention faults. None of them say anything about revisions. */
 const RETRYABLE = new Set(['TransactionConflict', 'ThrottlingError', 'ProvisionedThroughputExceeded']);
@@ -47,6 +64,18 @@ export async function applyValid(
       await ddb.send(new TransactWriteCommand({ TransactItems: buildTransaction(update) }));
       return 'ACCEPTED';
     } catch (error) {
+      // DynamoDB reports contention through TWO different exception types, and
+      // this one is not a cancellation at all: it is raised when the item is
+      // already inside another in-flight transaction. It says nothing about
+      // revisions, so it is retried, never counted.
+      if (error instanceof TransactionConflictException) {
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(backoffFor(attempt));
+          continue;
+        }
+        throw error;
+      }
+
       // Anything that is not a cancelled transaction is an infrastructure
       // failure. It must never be counted as "ignored" — a failed write recorded
       // as a domain outcome is a silently wrong number.
@@ -69,9 +98,12 @@ export async function applyValid(
       // says NOTHING about which revision is newer. Treating it as "ignored"
       // would leave a result stuck at an old revision permanently, which is
       // exactly the failure this system exists to prevent.
+      // Note the position: a conflict usually appears at index 1, the shared
+      // STATS item, not at index 0. Every update for an event touches that one
+      // row, so it is the most contended item in the table by a wide margin.
       const retryable = reasons.some((reason) => reason.Code && RETRYABLE.has(reason.Code));
       if (retryable && attempt < MAX_ATTEMPTS) {
-        await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1) + Math.random() * BASE_BACKOFF_MS);
+        await sleep(backoffFor(attempt));
         continue;
       }
 
@@ -146,7 +178,7 @@ function buildTransaction(update: TimingUpdate) {
     {
       Update: {
         TableName: TABLE_NAME,
-        Key: statsKey(update.eventId),
+        Key: statsShardKey(update.eventId),
         UpdateExpression: 'ADD updatesAccepted :one',
         ExpressionAttributeValues: { ':one': 1 },
       },
@@ -172,14 +204,43 @@ function buildTransaction(update: TimingUpdate) {
  * cancelled. If the Lambda dies between the two, the feed retries, the condition
  * fails again and the update is counted once. Under a crash with no retry the
  * ignored count is short by one — the concession recorded in DECISIONS.md.
+ *
+ * It needs the same retry as the transaction, and for the same reason: it writes
+ * to the STATS item, the single most contended row in the table. Measured — with
+ * no retry here, 33 of 200 updates failed with a 5xx under only five concurrent
+ * requests, even though the transaction above was retrying correctly.
  */
 async function countIgnored(eventId: string): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE_NAME,
-      Key: statsKey(eventId),
-      UpdateExpression: 'ADD updatesIgnored :one',
-      ExpressionAttributeValues: { ':one': 1 },
-    }),
-  );
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE_NAME,
+          Key: statsShardKey(eventId),
+          UpdateExpression: 'ADD updatesIgnored :one',
+          ExpressionAttributeValues: { ':one': 1 },
+        }),
+      );
+      return;
+    } catch (error) {
+      // A plain write can hit this too: the item is inside another in-flight
+      // transaction. Nothing to classify here — there is no condition on this
+      // write, so contention is the only thing that can go wrong.
+      if (isContention(error) && attempt < MAX_ATTEMPTS) {
+        await sleep(backoffFor(attempt));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/** Contention, however DynamoDB chooses to report it. Never a revision verdict. */
+function isContention(error: unknown): boolean {
+  if (error instanceof TransactionConflictException) return true;
+  if (error instanceof TransactionCanceledException) {
+    return (error.CancellationReasons ?? []).some((r) => r.Code && RETRYABLE.has(r.Code));
+  }
+  const name = (error as { name?: string })?.name ?? '';
+  return RETRYABLE.has(name) || name === 'ThrottlingException';
 }

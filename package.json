@@ -5,7 +5,8 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "node --import tsx --test test/*.test.ts",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "harness": "node --import tsx test/harness.ts"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.163",

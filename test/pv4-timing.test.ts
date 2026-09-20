@@ -29,10 +29,15 @@ test('nothing in the template hardcodes a real account id', () => {
   const { template } = synth();
   const json = JSON.stringify(template.toJSON());
 
-  // Any 12-digit run is an AWS account id. The only one allowed is the dummy
-  // passed in above. Written generically so this file never itself carries a
-  // fragment of the real account id — the repo is public.
-  const accountIds = (json.match(/\d{12}/g) ?? []).filter((id) => id !== '000000000000');
+  // A standalone 12-digit run is an AWS account id; the only one allowed is the
+  // dummy passed in above. Written generically so this file never itself carries
+  // a fragment of the real account id — the repo is public.
+  //
+  // The boundaries matter: asset hashes are hex, and a 64-character hex string
+  // regularly contains twelve consecutive digits by chance. Without them this
+  // test fails at random whenever a bundled asset changes.
+  const accountIds = (json.match(/(?<![0-9a-zA-Z])\d{12}(?![0-9a-zA-Z])/g) ?? [])
+    .filter((id) => id !== '000000000000');
   assert.deepEqual(accountIds, [], 'no real account id may be baked into the template');
 });
 
