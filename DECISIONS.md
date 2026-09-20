@@ -172,11 +172,44 @@ agreed on every single run, including the broken ones. A design that guessed
 would have recorded those as "ignored", left results stuck at stale revisions,
 and still produced counters that balanced perfectly.
 
+Those numbers were re-confirmed after the final deploy, so they describe the
+build that is running now rather than an earlier one.
+
 The concurrency case is the one I would point at in an interview: six revisions
 for one athlete fired simultaneously, twenty rounds, and the final state is
 revision 6 every time. Anything from one to six of them is accepted depending on
 which lands first — if the newest wins the race, the other five are correctly
 ignored — and accepted plus ignored always equals what was sent.
+
+### How it is tested
+
+Four layers, each catching something the others cannot.
+
+**Pure functions**, tested exhaustively rather than by example. The ordering rule
+is checked against all 720 arrival orders of six revisions; validation is checked
+against every corrupt variant of every field rule in the brief.
+
+**Stack assertions** pin the decisions that are cheap to get wrong and expensive
+to notice late: exactly one IAM policy carries table write permissions and it is
+the ingest function, the alarm actually notifies something, the API key outlives
+the assessment, no function carries reserved concurrency, and all four
+submission URLs are outputs.
+
+**A template snapshot** fails on any change to the synthesized stack at all,
+which is the point — it catches the change nobody thought to assert on. Asset
+hashes and the key expiry are scrubbed, since both move on every build.
+
+**The deployed harness**, described above, because every real bug in this project
+was found there and nowhere else.
+
+I also checked the stack tests actually bite, by breaking the stack on purpose
+one change at a time — giving the read API write access, removing the alarm
+action, changing log retention, pointing the alarm at rejections — and confirming
+each was caught. A test that has never failed is not yet evidence of anything.
+
+There are deliberately no unit tests for the handler: mocking the DynamoDB client
+would test the mock, and the mock would have happily accepted the malformed
+transaction that broke every request on the first deploy.
 
 ### Alternatives I considered and discounted
 
@@ -234,6 +267,8 @@ Each of these is a decision rather than an oversight, so they are written down.
 | Unit tests for the handler | Deliberately none | Mocking the DynamoDB client would test the mock. The deployed harness tests the real thing, and it is what found every real bug |
 | SDK retry attempts | Pinned to 1 on the client | The SDK's default of 3 would sit underneath the retry policy in `src/retry.ts`, making that file's stated worst case untrue. One attempt there means one policy, and the budget against the Lambda timeout is real. Transient connection errors now surface as 5xx and the feed re-sends |
 | Rejection payload TTL | 30 days, not 7 | The brief asks for the payload to be retrievable afterwards, and the review may be weeks after submission |
+| An unknown event | Zeros, `[]` and `0` — never null, never an error | Every one of those return types is non-null in the schema, so absence has to be a value |
+| Metric dimensions | None per event or per athlete | CloudWatch charges per unique metric-and-dimension combination, so an unbounded dimension turns a free metric into a growing bill. Those stay in the logs, which can be searched by athlete without being charged per athlete |
 
 ---
 
