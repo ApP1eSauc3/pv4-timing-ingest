@@ -22,6 +22,7 @@ import { TransactionCanceledException, TransactionConflictException } from '@aws
 import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
 import { ddb, eventRegistryKey, resultKey, statsShardKey, TABLE_NAME } from './db';
+import { backoffFor, MAX_ATTEMPTS, RETRYABLE, sleep, withContentionRetry } from './retry';
 import type { TimingUpdate } from './types';
 
 /**
@@ -35,25 +36,9 @@ import type { TimingUpdate } from './types';
  * one row even when they concern different athletes. Measured: at five requests
  * in flight, three attempts left 20 of 200 updates failing.
  */
-const MAX_ATTEMPTS = 8;
-const BASE_BACKOFF_MS = 25;
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Exponential with jitter, capped. The cap matters: doubling unchecked, eight
- * attempts would reach 3.2 s on the last one alone and risk the Lambda's 10 s
- * timeout. Capped at 200 ms the whole sequence is ~1.2 s worst case.
- *
- * Jitter is not decoration — without it, two writers that collide retry in
- * lockstep and collide again.
- */
-const BACKOFF_CAP_MS = 200;
-const backoffFor = (attempt: number) =>
-  Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS) + Math.random() * BASE_BACKOFF_MS;
 
-/** Capacity and contention faults. None of them say anything about revisions. */
-const RETRYABLE = new Set(['TransactionConflict', 'ThrottlingError', 'ProvisionedThroughputExceeded']);
 
 export async function applyValid(
   update: TimingUpdate,
@@ -211,36 +196,15 @@ function buildTransaction(update: TimingUpdate) {
  * requests, even though the transaction above was retrying correctly.
  */
 async function countIgnored(eventId: string): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE_NAME,
-          Key: statsShardKey(eventId),
-          UpdateExpression: 'ADD updatesIgnored :one',
-          ExpressionAttributeValues: { ':one': 1 },
-        }),
-      );
-      return;
-    } catch (error) {
-      // A plain write can hit this too: the item is inside another in-flight
-      // transaction. Nothing to classify here — there is no condition on this
-      // write, so contention is the only thing that can go wrong.
-      if (isContention(error) && attempt < MAX_ATTEMPTS) {
-        await sleep(backoffFor(attempt));
-        continue;
-      }
-      throw error;
-    }
-  }
+  await withContentionRetry(() =>
+    ddb.send(
+      new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: statsShardKey(eventId),
+        UpdateExpression: 'ADD updatesIgnored :one',
+        ExpressionAttributeValues: { ':one': 1 },
+      }),
+    ),
+  );
 }
 
-/** Contention, however DynamoDB chooses to report it. Never a revision verdict. */
-function isContention(error: unknown): boolean {
-  if (error instanceof TransactionConflictException) return true;
-  if (error instanceof TransactionCanceledException) {
-    return (error.CancellationReasons ?? []).some((r) => r.Code && RETRYABLE.has(r.Code));
-  }
-  const name = (error as { name?: string })?.name ?? '';
-  return RETRYABLE.has(name) || name === 'ThrottlingException';
-}

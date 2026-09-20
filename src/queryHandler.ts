@@ -11,7 +11,7 @@
  * so even a bug cannot change a result.
  */
 
-import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { AppSyncResolverEvent } from 'aws-lambda';
 
 import { ddb, globalStatsKey, statsKey, TABLE_NAME } from './db';
@@ -92,8 +92,11 @@ export async function handler(
 
     // Pipeline-wide, because a corrupt payload may not say which event it was.
     case 'updatesRejected': {
-      const got = await ddb.send(new GetCommand({ TableName: TABLE_NAME, Key: globalStatsKey() }));
-      return Number(got.Item?.updatesRejected ?? 0);
+      // Summed across counter shards, like the per-event counters. Items written
+      // before sharding have the plain `STATS` sort key and are included, so no
+      // rejection ever stops being counted.
+      const items = await queryAll('PK = :pk', { ':pk': globalStatsKey().PK });
+      return items.reduce((total, item) => total + Number(item.updatesRejected ?? 0), 0);
     }
 
     // An unknown field means the schema and the resolvers disagree. Returning a

@@ -15,7 +15,8 @@
 import { randomUUID } from 'node:crypto';
 import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 
-import { ddb, globalStatsKey, rejectionKey, TABLE_NAME } from './db';
+import { ddb, globalStatsShardKey, rejectionKey, TABLE_NAME } from './db';
+import { withContentionRetry } from './retry';
 import type { CheckName } from './types';
 
 /**
@@ -39,9 +40,13 @@ export async function storeRejection(
   const body = rawBody ?? '';
   const truncated = body.length > MAX_STORED_BODY_CHARS;
 
-  await ddb.send(
-    new TransactWriteCommand({
-      TransactItems: [
+  // Retried like every other write to a shared counter. Without this, the
+  // rejection path was the last thing still producing 5xx under load: every
+  // rejection in the pipeline increments the same counter.
+  await withContentionRetry(() =>
+    ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
         {
           Put: {
             TableName: TABLE_NAME,
@@ -62,12 +67,13 @@ export async function storeRejection(
         {
           Update: {
             TableName: TABLE_NAME,
-            Key: globalStatsKey(),
+            Key: globalStatsShardKey(),
             UpdateExpression: 'ADD updatesRejected :one',
             ExpressionAttributeValues: { ':one': 1 },
           },
         },
       ],
-    }),
+      }),
+    ),
   );
 }

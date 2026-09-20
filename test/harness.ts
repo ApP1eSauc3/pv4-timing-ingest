@@ -199,7 +199,7 @@ async function conflictScenario(rounds = 20): Promise<void> {
   const before = (await graphql(`{ eventStats(eventId:"${eventId}"){ updatesAccepted updatesIgnored } }`)) as {
     eventStats: { updatesAccepted: number; updatesIgnored: number };
   };
-  let accepted = 0;
+  let posted = 0;
 
   for (let round = 1; round <= rounds; round += 1) {
     const bib = `CONFLICT-${round}`;
@@ -223,7 +223,7 @@ async function conflictScenario(rounds = 20): Promise<void> {
     assert.ok(stored, `${bib} missing after concurrent writes`);
     assert.equal(stored.revision, 6, `round ${round}: stuck at revision ${stored.revision}, expected 6`);
 
-    accepted += 6;
+    posted += 6;
     process.stdout.write(`r${round}:${stored.revision} `);
   }
 
@@ -231,22 +231,26 @@ async function conflictScenario(rounds = 20): Promise<void> {
     eventStats: { updatesAccepted: number; updatesIgnored: number };
   };
 
-  // Six distinct revisions fired at once must produce exactly six accepts and
-  // no ignores per round. If a retry ever re-applied a write whose response was
-  // lost, the accepted count would exceed this — the one check that would catch
-  // a duplicate accept under retry.
-  assert.equal(
-    after.eventStats.updatesAccepted - before.eventStats.updatesAccepted,
-    accepted,
-    'accepted count must be exactly 6 per round — no double counting under retry',
-  );
-  assert.equal(
-    after.eventStats.updatesIgnored - before.eventStats.updatesIgnored,
-    0,
-    'six distinct revisions should produce no ignores',
-  );
+  const acceptedDelta = after.eventStats.updatesAccepted - before.eventStats.updatesAccepted;
+  const ignoredDelta = after.eventStats.updatesIgnored - before.eventStats.updatesIgnored;
 
-  console.log(`\n✓ ${rounds} rounds, final revision 6 every time, ${accepted} accepted, 0 ignored`);
+  // NOT "six accepted per round". When six revisions arrive simultaneously the
+  // split depends on the order they land in: if revision 6 wins the race first,
+  // the other five are all correctly ignored. Anything from 1 to 6 accepts is a
+  // valid outcome, and insisting on 6 was simply wrong.
+  //
+  // What must hold is the invariant: every update lands in exactly one bucket,
+  // and none is counted twice. A retry that re-applied a write whose response
+  // was lost would push the total above the number sent.
+  assert.equal(
+    acceptedDelta + ignoredDelta,
+    posted,
+    `accepted + ignored must equal the ${posted} updates sent — no double counting under retry`,
+  );
+  assert.ok(acceptedDelta >= rounds, 'at least one update per round must have been applied');
+  console.log(`accepted ${acceptedDelta}, ignored ${ignoredDelta}, sent ${posted}`);
+
+  console.log(`✓ ${rounds} rounds, final revision was 6 every time`);
 }
 
 async function main(): Promise<void> {

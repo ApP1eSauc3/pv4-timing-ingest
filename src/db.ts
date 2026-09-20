@@ -77,7 +77,18 @@ export const eventRegistryKey = (eventId: string) => ({
 /**
  * Pipeline-wide counters. `updatesRejected` is not per event because a corrupt
  * payload may not say which event it belonged to — or anything else.
+ *
+ * Sharded for the same reason the per-event counters are, and it is the more
+ * contended of the two: every rejection in the entire pipeline increments this
+ * one counter, whatever event it came from. Measured — unsharded and without a
+ * retry, it was the single remaining source of 5xx responses under load.
  */
+export const globalStatsShardKey = (shard = Math.floor(Math.random() * STATS_SHARDS)) => ({
+  PK: 'GLOBAL',
+  SK: `STATS#${shard}`,
+});
+
+/** Read from: the partition holding every global counter shard. */
 export const globalStatsKey = () => ({
   PK: 'GLOBAL',
   SK: 'STATS',
