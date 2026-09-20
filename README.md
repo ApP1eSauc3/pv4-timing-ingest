@@ -1,14 +1,43 @@
-# Welcome to your CDK TypeScript project
+# PV4 timing ingest
 
-This is a blank project for CDK development with TypeScript.
+Ingest-and-read pipeline for live competition timing updates, defined in AWS CDK
+(TypeScript).
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+```
+POST /timing  ──▶  processor  ──▶  DynamoDB  ──▶  AppSync (GraphQL)  ──▶  CloudFront page
+```
 
-## Useful commands
+See [`DECISIONS.md`](./DECISIONS.md) for the design rationale and known concessions.
 
-* `npm run build`   type-check the project
-* `npm run watch`   watch for changes and type-check
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
+## Deployed endpoints
+
+| | |
+|---|---|
+| Ingest URL | _TBD_ |
+| AppSync GraphQL URL | _TBD_ |
+| AppSync API key | _TBD_ |
+| CloudFront URL | _TBD_ |
+
+## Deploy
+
+```bash
+npm install
+npx cdk bootstrap          # once per account + region
+npx cdk deploy Pv4TimingStack
+```
+
+The four URLs above are emitted as stack outputs.
+
+## Test
+
+```bash
+npm test                   # node:test — validation and ordering decision
+```
+
+## Teardown
+
+```bash
+npx cdk destroy Pv4TimingStack
+```
+
+Never run a bare `cdk destroy`, and do not delete the shared `CDKToolkit` stack.

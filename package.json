@@ -1,23 +1,24 @@
 {
-  "name": "candidate_brief_test",
+  "name": "pv4-timing",
   "version": "0.1.0",
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "test": "jest",
+    "test": "node --import tsx --test test/*.test.ts",
     "cdk": "cdk"
   },
   "devDependencies": {
-    "@swc/core": "^1.15.0",
-    "@swc/jest": "^0.2.39",
-    "@types/jest": "^30",
+    "@types/aws-lambda": "^8.10.163",
     "@types/node": "^24.10.1",
-    "jest": "^30",
     "aws-cdk": "2.1142.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.0",
     "typescript": "~7.0.2"
   },
   "dependencies": {
+    "@aws-lambda-powertools/logger": "^2.35.0",
+    "@aws-sdk/client-dynamodb": "^3.1136.0",
+    "@aws-sdk/lib-dynamodb": "^3.1136.0",
     "aws-cdk-lib": "^2.269.0",
     "constructs": "^10.5.0"
   }

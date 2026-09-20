@@ -27,7 +27,6 @@
     "noEmit": true,
     "isolatedModules": true,
     "types": [
-      "jest",
       "node"
     ]
   },
