@@ -35,12 +35,25 @@ one partition rather than a scan, and it pages, so it is cheap — but for a who
 season rather than a meet it would want a date prefix or pagination in the
 contract. Fine for what this is; wrong for something long-lived.
 
-**The alarm has no subscriber, unless I have added one out of band.** The alarm
-and its SNS topic are defined in CDK, but a topic with no subscription delivers
-nowhere — the alarm would fire into nothing. Subscribing needs an email address,
-and an address does not belong in a public repo, so it is a deliberate step
-outside the stack rather than part of it. If I have not run it before you read
-this, treat the alarm as defined but not delivering.
+**The alarm is defined but delivers nowhere.** The CloudWatch alarm and its SNS
+topic are both in the stack, and the alarm is armed — it sits in `OK` with
+actions enabled. What it does not have is a confirmed subscriber, so if it fired
+today nobody would hear it.
+
+The subscription is not in CDK on purpose: it needs an email address, and an
+address does not belong in a public repo. I requested one from the CLI instead,
+and it is sitting at `PendingConfirmation` because the confirmation email has not
+arrived. AWS mail reaches that address fine — support case notifications from the
+same morning landed normally — so this is SNS being slow rather than anything
+misconfigured, and it will likely resolve itself. Either way it was not confirmed
+when I submitted, so I am not claiming it.
+
+This is the concession I would most want flagged, because an alarm that looks
+like coverage and delivers nothing is worse than no alarm at all. What the stack
+does give you is the useful half: the alarm watches Lambda errors rather than
+rejections, so it stays quiet during a normal race, and the metric and structured
+logs are queryable regardless of whether the email works. Wiring it up is one
+command, in the README.
 
 **A lane that changes between revisions is stored, not rejected.** The brief says
 lane is fixed for the race but defines no rule for what to do when it is not, so
