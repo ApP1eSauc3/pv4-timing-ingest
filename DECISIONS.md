@@ -66,6 +66,23 @@ an oversight.
 | Oversized body | Reject above 64 KB *before* `JSON.parse` | Parsing costs time linear in a body the feed controls |
 | Test runner | `node:test` via `tsx`, not jest | `cdk init` installed jest; plain `node:test` needs no framework and the tests are pure functions |
 
+### Read API: one Lambda, not AppSync JavaScript resolvers
+
+The plan called for AppSync JS resolvers with a Lambda resolver as a timeboxed
+fallback. I took the Lambda from the start, for three reasons rather than time:
+
+- Everything else here is TypeScript with tests that run locally in under two
+  seconds. APPSYNC_JS resolvers are untyped JavaScript that can only really be
+  tested by calling AWS, so they would have been the only untested code in the
+  project.
+- `eventStats` has to split one Query's results into counters and athletes.
+  That is four lines of ordinary code and an awkward response template.
+- It is easier to talk through in an interview.
+
+The cost is one more Lambda — a cold start on the read path and another function
+competing for this account's concurrency — and one more hop than a direct
+DynamoDB resolver would need. At a race's data volumes neither is material.
+
 ### Alternatives considered and discounted
 
 <!-- Only ones genuinely entertained. Candidates listed in docs/CONTEXT.md:

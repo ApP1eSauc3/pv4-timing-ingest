@@ -80,3 +80,43 @@ test('POST /timing is the only route', () => {
   template.resourceCountIs('AWS::ApiGatewayV2::Route', 1);
   template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'POST /timing' });
 });
+
+test('the GraphQL API uses API key auth', () => {
+  const { template } = synth();
+  template.hasResourceProperties('AWS::AppSync::GraphQLApi', { AuthenticationType: 'API_KEY' });
+});
+
+test('the API key outlives the assessment', () => {
+  const { template } = synth();
+  // AppSync's default expiry is SEVEN DAYS. The key has to still work when they
+  // come to grade this, which may be weeks after submission.
+  const keys = Object.values(template.findResources('AWS::AppSync::ApiKey'));
+  assert.equal(keys.length, 1);
+  const expires = (keys[0] as { Properties: { Expires: number } }).Properties.Expires;
+  const daysOut = (expires * 1000 - Date.now()) / 86_400_000;
+  assert.ok(daysOut > 300, `API key expires in ${Math.round(daysOut)} days — too soon`);
+});
+
+test('all four queries in the contract have a resolver', () => {
+  const { template } = synth();
+  template.resourceCountIs('AWS::AppSync::Resolver', 4);
+  for (const fieldName of ['events', 'results', 'eventStats', 'updatesRejected']) {
+    template.hasResourceProperties('AWS::AppSync::Resolver', { TypeName: 'Query', FieldName: fieldName });
+  }
+});
+
+test('the read API cannot write to the table', () => {
+  const { template } = synth();
+  // Structural, not a convention: the query function is granted read actions
+  // only, so a bug in it can never change a result.
+  const policies = Object.values(template.findResources('AWS::IAM::Policy'))
+    .map((p) => JSON.stringify((p as { Properties: unknown }).Properties))
+    .filter((p) => p.includes('QueryFunction'));
+
+  assert.ok(policies.length >= 1, 'no policy found for the query function');
+  for (const policy of policies) {
+    for (const write of ['dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem']) {
+      assert.equal(policy.includes(write), false, `query function must not have ${write}`);
+    }
+  }
+});

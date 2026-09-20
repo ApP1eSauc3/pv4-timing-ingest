@@ -2,6 +2,7 @@ import * as path from 'node:path';
 
 import * as cdk from 'aws-cdk-lib/core';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as appsync from 'aws-cdk-lib/aws-appsync';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -93,12 +94,72 @@ export class Pv4TimingStack extends cdk.Stack {
       integration: new HttpLambdaIntegration('IngestIntegration', ingestFn),
     });
 
+    // ── Read API ───────────────────────────────────────────────────────────
+    // One Lambda behind all four queries, rather than AppSync's JavaScript
+    // resolvers. See the note at the top of src/queryHandler.ts.
+    const queryLogGroup = new logs.LogGroup(this, 'QueryLogGroup', {
+      logGroupName: '/aws/lambda/pv4-query',
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const queryFn = new NodejsFunction(this, 'QueryFunction', {
+      functionName: 'pv4-query',
+      entry: path.join(__dirname, '..', 'src', 'queryHandler.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      environment: { TABLE_NAME: table.tableName },
+      logGroup: queryLogGroup,
+      bundling: { externalModules: [], minify: false, sourceMap: true },
+    });
+
+    // Read-only, deliberately. The read API can never change a result, however
+    // wrong its code might be.
+    table.grantReadData(queryFn);
+
+    const api = new appsync.GraphqlApi(this, 'ResultsApi', {
+      name: 'pv4-results-api',
+      definition: appsync.Definition.fromFile(path.join(__dirname, 'schema.graphql')),
+      authorizationConfig: {
+        defaultAuthorization: {
+          authorizationType: appsync.AuthorizationType.API_KEY,
+          apiKeyConfig: {
+            // The default is SEVEN DAYS, which would expire before this is
+            // graded. The key is meant to be shared; it is not a secret.
+            expires: cdk.Expiration.after(cdk.Duration.days(365)),
+            description: 'pv4 results — read only',
+          },
+        },
+      },
+    });
+
+    const queryDataSource = api.addLambdaDataSource('QueryDataSource', queryFn);
+
+    for (const fieldName of ['events', 'results', 'eventStats', 'updatesRejected']) {
+      queryDataSource.createResolver(`${fieldName}Resolver`, {
+        typeName: 'Query',
+        fieldName,
+      });
+    }
+
     // ── Outputs ────────────────────────────────────────────────────────────
     // Printed by the stack so they don't have to be hunted in the console weeks
     // from now, when the submission asks for them.
     new cdk.CfnOutput(this, 'IngestUrl', {
       value: `${httpApi.apiEndpoint}/timing`,
       description: 'POST timing updates here',
+    });
+
+    new cdk.CfnOutput(this, 'GraphqlUrl', {
+      value: api.graphqlUrl,
+      description: 'AppSync GraphQL endpoint',
+    });
+
+    new cdk.CfnOutput(this, 'GraphqlApiKey', {
+      value: api.apiKey ?? 'none',
+      description: 'AppSync API key — meant to be shared, expires in 365 days',
     });
 
     new cdk.CfnOutput(this, 'TableName', { value: table.tableName });

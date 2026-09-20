@@ -38,3 +38,11 @@ export type ValidationResult =
 
 /** What the processor did with one update. Every update lands in exactly one. */
 export type Outcome = 'ACCEPTED' | 'IGNORED' | 'REJECTED';
+
+/** What `eventStats` returns. Every field is non-null in the schema. */
+export type EventStatsShape = {
+  eventId: string;
+  athletesTracked: number;
+  updatesAccepted: number;
+  updatesIgnored: number;
+};
