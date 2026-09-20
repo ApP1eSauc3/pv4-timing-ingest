@@ -82,7 +82,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   // one's bib - a trace pointing at the wrong athlete is worse than none.
   const context = { requestId, eventId, bib, revision, status };
 
-  const outcome = await applyValid(validation.update, requestId);
+  const outcome = await applyValid(validation.update);
 
   logger.info(`update ${outcome.toLowerCase()}`, { ...context, outcome });
 

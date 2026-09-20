@@ -26,10 +26,7 @@ import { backoffFor, MAX_ATTEMPTS, RETRYABLE, sleep, withContentionRetry } from 
 import type { TimingUpdate } from './types';
 
 
-export async function applyValid(
-  update: TimingUpdate,
-  _requestId: string,
-): Promise<'ACCEPTED' | 'IGNORED'> {
+export async function applyValid(update: TimingUpdate): Promise<'ACCEPTED' | 'IGNORED'> {
   for (let attempt = 1; ; attempt += 1) {
     try {
       await ddb.send(new TransactWriteCommand({ TransactItems: buildTransaction(update) }));
