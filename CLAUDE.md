@@ -1,6 +1,6 @@
 # PV4 timing ingest — RWS Global technical assessment
 
-Last updated: 2026-09-20
+Last updated: 2026-09-21
 
 Ingest-and-read pipeline in AWS CDK (TypeScript):
 `POST /timing` → processor → DynamoDB → AppSync (API key) → CloudFront + S3 page.
@@ -33,8 +33,10 @@ docs/       write-up working notes → DECISIONS.md at repo root
 ## Naming
 
 - Stack `Pv4TimingStack`; every resource prefixed `pv4-`; stack tagged `project=pv4`.
-- Source files camelCase (`validateUpdate.ts`); types PascalCase, no `I` prefix.
-- Tests live in `test/` as `<subject>.test.ts`, mirroring `src/`.
+- Source files camelCase (`queryHandler.ts`, `applyValid.ts`); types PascalCase,
+  no `I` prefix.
+- Tests live in `test/` as `<subject>.test.ts`, mirroring `src/`. The stack tests
+  are named for what they assert instead: `stack-assertions`, `stack-snapshot`.
 
 ## Non-negotiable
 
