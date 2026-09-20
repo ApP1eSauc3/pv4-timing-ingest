@@ -35,6 +35,13 @@ one partition rather than a scan, and it pages, so it is cheap — but for a who
 season rather than a meet it would want a date prefix or pagination in the
 contract. Fine for what this is; wrong for something long-lived.
 
+**The alarm has no subscriber, unless I have added one out of band.** The alarm
+and its SNS topic are defined in CDK, but a topic with no subscription delivers
+nowhere — the alarm would fire into nothing. Subscribing needs an email address,
+and an address does not belong in a public repo, so it is a deliberate step
+outside the stack rather than part of it. If I have not run it before you read
+this, treat the alarm as defined but not delivering.
+
 **A lane that changes between revisions is stored, not rejected.** The brief says
 lane is fixed for the race but defines no rule for what to do when it is not, so
 I store the latest applied value rather than invent a rule the brief does not ask
@@ -212,6 +219,8 @@ Each of these is a decision rather than an oversight, so they are written down.
 | Integer bounds | Rejected above 2^31−1 | GraphQL `Int` is 32-bit, and a larger value would break the read contract on the way out |
 | Oversized body | Rejected above 64 KB, before parsing | Parsing costs time in proportion to a body the feed controls |
 | Unit tests for the handler | Deliberately none | Mocking the DynamoDB client would test the mock. The deployed harness tests the real thing, and it is what found every real bug |
+| SDK retry attempts | Pinned to 1 on the client | The SDK's default of 3 would sit underneath the retry policy in `src/retry.ts`, making that file's stated worst case untrue. One attempt there means one policy, and the budget against the Lambda timeout is real. Transient connection errors now surface as 5xx and the feed re-sends |
+| Rejection payload TTL | 30 days, not 7 | The brief asks for the payload to be retrievable afterwards, and the review may be weeks after submission |
 
 ---
 

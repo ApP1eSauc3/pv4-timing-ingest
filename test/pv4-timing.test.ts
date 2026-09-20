@@ -172,3 +172,18 @@ test('the page hardcodes no endpoint — it reads config.json at runtime', () =>
   assert.equal(/appsync-api|execute-api|da2-/.test(page), false, 'no endpoint or key may be baked into the page');
   assert.equal(/eventId:\s*"WC26/.test(page), false, 'no event id may be hardcoded');
 });
+
+test('the page distinguishes a broken read from an empty one', () => {
+  const page = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8');
+
+  // An expired API key is the most likely failure weeks after deployment. If it
+  // rendered the same as "this event has no results yet", nobody grading it
+  // would know the difference.
+  assert.ok(page.includes('UNAUTHORIZED'), 'must detect a rejected API key');
+  assert.ok(page.includes('showBanner'), 'must surface failures in a banner');
+  assert.ok(
+    page.includes('Results could not be loaded.'),
+    'a failed read must say so rather than showing an empty table',
+  );
+  assert.ok(page.includes('No events yet'), 'a genuinely empty pipeline still says so separately');
+});

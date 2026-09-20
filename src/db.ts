@@ -24,13 +24,27 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 export const TABLE_NAME = process.env.TABLE_NAME ?? '';
 
-export const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
-  marshallOptions: {
-    // recordedAt is optional and often absent. Without this the document client
-    // throws on an undefined attribute instead of omitting it.
-    removeUndefinedValues: true,
+export const ddb = DynamoDBDocumentClient.from(
+  new DynamoDBClient({
+    // The SDK defaults to maxAttempts 3 and retries throttling itself. That
+    // would sit underneath the retry policy in retry.ts, giving two layers with
+    // two different backoffs and making the ~1.2 s worst case in that file
+    // untrue. One attempt here means retry.ts is genuinely the only policy, and
+    // its budget against the Lambda's 10 s timeout is the real one.
+    //
+    // The cost: a transient connection error is no longer retried by the SDK
+    // and surfaces as a 5xx, which the feed re-sends. Contention and throttling
+    // are both still retried, by us.
+    maxAttempts: 1,
+  }),
+  {
+    marshallOptions: {
+      // recordedAt is optional and often absent. Without this the document
+      // client throws on an undefined attribute instead of omitting it.
+      removeUndefinedValues: true,
+    },
   },
-});
+);
 
 /** One athlete's current state within one event. */
 export const resultKey = (eventId: string, bib: string) => ({

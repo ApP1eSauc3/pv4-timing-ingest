@@ -24,8 +24,13 @@ import type { CheckName } from './types';
  */
 const MAX_STORED_BODY_CHARS = 300 * 1024;
 
-/** Corrupt payloads are evidence, not records. A week is long enough to debug. */
-const REJECTION_TTL_DAYS = 7;
+/**
+ * Corrupt payloads are evidence, not records, so they age out rather than
+ * accumulating. Thirty days rather than seven: the brief asks for the payload to
+ * be retrievable afterwards, and the stack stays up until they have finished
+ * reviewing it, which may be weeks away.
+ */
+const REJECTION_TTL_DAYS = 30;
 
 export async function storeRejection(
   rawBody: string | undefined | null,
