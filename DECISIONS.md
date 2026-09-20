@@ -2,319 +2,148 @@
 
 PV4 timing ingest — RWS Global technical assessment.
 
-Time spent: _TBD — fill this in before submitting_
+**Time spent:** 4 hours 30 minutes
 
 ---
 
 ## 1. Known concessions
 
-I would rather list these than claim the solution is complete, because every one
-of them is something I decided to live with rather than something I missed.
+These are deliberate trade-offs rather than missed requirements.
 
-**Updates that never reach the processor cannot be counted.** "Received" here
-means every POST that actually reaches the Lambda. If API Gateway rejects
-something before that — a body over its own 10 MB limit, a malformed request —
-it lands in none of the three buckets, because nothing of mine ever saw it.
+**Updates rejected before Lambda cannot be counted.** “Received” means requests that reach the processor. API Gateway rejections, such as malformed requests or bodies over its 10 MB limit, never reach any of the three buckets.
 
-**No reserved concurrency on the ingest Lambda.** This account's Lambda
-concurrency quota is 10, and AWS only permits a reservation that leaves at least
-100 unreserved, so the reservation I wanted could not be set at all. Under a
-sustained parallel burst some requests will be throttled by Lambda before
-reaching the processor, and like the case above they cannot be counted. I have
-requested an increase; it was still pending when I submitted this.
+**No reserved concurrency on the ingest Lambda.** The account's concurrency quota is 10, while AWS requires at least 100 unreserved concurrency for a reservation. A sustained burst can therefore be throttled before processing. I requested a quota increase; it was still pending at submission.
 
-**The ignored counter is a second write.** When the condition fails, the
-transaction it belonged to has already been cancelled, so incrementing
-`updatesIgnored` has to be a separate call. If the Lambda dies between the two
-and the feed never re-sends, that count comes up one short. With a re-send the
-condition simply fails again and it is counted once, so the exposure is a crash
-with no retry at all.
+**The ignored counter is a second write.** The original transaction has already been cancelled when the condition fails, so `updatesIgnored` requires another call. A crash between the two can leave the counter one short if the feed never retries. A retry does not double-count because the condition fails again.
 
-**`events` grows with the number of events ever seen.** It is one Query against
-one partition rather than a scan, and it pages, so it is cheap — but for a whole
-season rather than a meet it would want a date prefix or pagination in the
-contract. Fine for what this is; wrong for something long-lived.
+**`events` grows with events seen.** It uses a paginated Query rather than a scan, but a long-lived production system would want a date prefix or pagination in the contract.
 
-**The alarm is defined but delivers nowhere.** The CloudWatch alarm and its SNS
-topic are both in the stack, and the alarm is armed — it sits in `OK` with
-actions enabled. What it does not have is a confirmed subscriber, so if it fired
-today nobody would hear it.
+**The alarm has no confirmed subscriber.** CloudWatch and SNS are configured and the alarm is armed, but the subscription remains `PendingConfirmation`. I did not put the email in CDK because it does not belong in a public repository. The README contains the command to complete the subscription.
 
-The subscription is not in CDK on purpose: it needs an email address, and an
-address does not belong in a public repo. I requested one from the CLI instead,
-and it is sitting at `PendingConfirmation` because the confirmation email has not
-arrived. AWS mail reaches that address fine — support case notifications from the
-same morning landed normally — so this is SNS being slow rather than anything
-misconfigured, and it will likely resolve itself. Either way it was not confirmed
-when I submitted, so I am not claiming it.
+The alarm itself watches Lambda errors rather than normal conditional-write races, and its metric and structured logs remain queryable regardless of email delivery.
 
-This is the concession I would most want flagged, because an alarm that looks
-like coverage and delivers nothing is worse than no alarm at all. What the stack
-does give you is the useful half: the alarm watches Lambda errors rather than
-rejections, so it stays quiet during a normal race, and the metric and structured
-logs are queryable regardless of whether the email works. Wiring it up is one
-command, in the README.
-
-**A lane that changes between revisions is stored, not rejected.** The brief says
-lane is fixed for the race but defines no rule for what to do when it is not, so
-I store the latest applied value rather than invent a rule the brief does not ask
-for.
+**A changed lane is stored rather than rejected.** The brief says the lane is fixed but gives no behaviour for a change, so I store the latest applied value rather than inventing a rule.
 
 ---
 
 ## 2. How it works, and why
 
-### Ordering and idempotency are the same rule
+### Ordering and idempotency
 
-The part I most want to point at is how small this turned out to be. Both rules
-come down to one condition on one write:
+Both are enforced by the same DynamoDB condition:
 
-```
+```text
 ConditionExpression: attribute_not_exists(revision) OR revision < :rev
 ```
 
-If the condition holds, the incoming update is genuinely newer and overwrites
-what is stored. If it fails, whatever is already there was at least as new. A
-duplicate has the same revision, so the condition fails and it is ignored. A late
-arrival has a lower revision, so the condition fails and it is ignored. Both of
-the feed's misbehaviours resolve to the same comparison, which means there is no
-separate deduplication anywhere in this codebase and no second source of truth to
-keep in step.
+A newer revision replaces the stored value. Equal or lower revisions are ignored, so duplicates and late arrivals require no separate deduplication mechanism.
 
-Notice what the condition never mentions: status. That is what lets revision 4
-`PROVISIONAL` replace revision 3 `OFFICIAL` when a jury upholds a protest. A
-design that ordered on status would refuse that write and leave the scoreboard
-showing a time that had already been overturned, which is exactly the failure the
-brief describes.
+The condition deliberately ignores status. Therefore revision 4 `PROVISIONAL` can replace revision 3 `OFFICIAL`, as required when a protest changes the result.
 
-The worked example from the brief runs against the deployed stack and comes out
-exactly as specified — final state revision 4 `PROVISIONAL`, three accepted,
-three ignored. Arrival 5 is the interesting one: revision 3 `CONFIRMED` arriving
-while revision 3 `OFFICIAL` is stored. Ignored, because 3 is not greater than 3,
-whatever status it carries.
+The deployed worked example produces the expected final state: revision 4 `PROVISIONAL`, three accepted and three ignored. Revision 3 `CONFIRMED` arriving after revision 3 `OFFICIAL` is ignored because the revision is not greater.
 
-`src/decide.ts` states the same rule as a pure function and is tested against all
-720 arrival orders of six revisions, but the processor deliberately does not call
-it. Deciding in JavaScript would mean reading before writing, and two Lambdas
-handling the same athlete could then both read revision 3 and both write. Only
-the database can settle that, so the database is where the decision lives. The
-pure function exists because it is the only version that can be tested
-exhaustively.
+`src/decide.ts` implements the same rule as a pure function and is tested against all 720 arrival orders of six revisions. The processor does not use it for the actual decision: reading before writing would allow concurrent Lambdas to make the same decision. DynamoDB's conditional write must remain authoritative.
 
 ### Validation
 
-Everything corrupt is caught before any write happens: size check, then parse,
-then field-by-field validation. Consequently a corrupt payload can never create
-a phantom athlete, and one bad payload only ever affects its own request — the
-updates behind it are unaffected, since each arrives as its own invocation.
+Validation happens before any write: size check, parsing, then field-by-field validation. Invalid input therefore cannot create an athlete, and each request is isolated from others.
 
-Validation is strict by construction. A field is valid only if it is positively
-valid, so `"3"`, `3.5`, `"official"`, `null` and a missing field are all corrupt.
-Every failing rule is collected rather than stopping at the first, and the names
-of those rules are stored on the rejection, so a rejection explains itself
-without anyone having to reproduce it.
+Validation is positive and strict: `"3"`, `3.5`, `"official"`, `null`, and missing fields are invalid. All failures are collected and their rule names stored on the rejection.
 
-The rejection record and the rejected counter are written in a single
-transaction. Written separately they could disagree — a stored payload nobody
-counted, or a count with no payload behind it — and then neither number means
-anything.
+The rejection payload and `updatesRejected` counter are written in one transaction so they cannot diverge.
 
 ### Counting
 
-Every update that reaches the processor lands in exactly one of accepted, ignored
-or rejected. A 5xx is not a fourth bucket: it means we genuinely do not know what
-happened, nothing is counted, and the feed re-sends. That is why any
-infrastructure failure throws instead of being quietly filed as "ignored", which
-would balance the books with a wrong number.
+Every update reaching the processor is either accepted, ignored, or rejected. A 5xx is deliberately not a fourth bucket: it means the outcome is unknown, nothing is counted, and the feed retries.
 
-`athletesTracked` is counted from the athlete rows every time it is asked for,
-never stored. The counters and the athletes share a partition key, so one Query
-returns both, and a count derived from the rows cannot drift out of step with the
-rows themselves the way a stored number eventually would.
+`athletesTracked` is calculated from athlete rows rather than stored as a counter. The athletes and counters share a partition key, so one Query retrieves the required data without introducing another mutable source of truth.
 
-### What load testing changed, and how confident I am
+### Load testing
 
-Confident, but only because of what the harness found — none of this was visible
-in unit tests, and the static checks all passed while the code was broken.
+The deployed harness sends 200 updates across 8 athletes with shuffled ordering, ~20% duplicates, ~10% corrupt payloads and five concurrent requests. It checks both counter balance and final revision correctness.
 
-The harness fires 200 updates across 8 athletes at the deployed stack: shuffled,
-about 20% duplicates, about 10% corrupt, five requests in flight. It asserts both
-that the counters balance and that every athlete ended at their highest valid
-revision, because balanced is not the same as correct.
+The initial runs exposed three issues:
 
-```
-3 retries, one counter row           20 of 200 failed
-collision exception handled          34 of 200 failed  (the ignored path was unguarded)
-both accept paths guarded             2 of 200 failed
-counters spread over 25 rows          1 of 200 failed  (the rejection path was unguarded)
-rejection path guarded and spread     0 of 200 failed  — three consecutive runs
+1. DynamoDB could report transaction collisions through two exception types; only one was handled.
+2. The ignored-counter write had no retry.
+3. All updates incremented one counter row, creating unnecessary contention between unrelated athletes.
+
+The final design centralises retry handling and spreads counters across rows, aggregating them on read.
+
+```text
+3 retries, one counter row           20/200 failed
+collision exception handled          34/200 failed
+both accept paths guarded              2/200 failed
+counters spread over 25 rows           1/200 failed
+final implementation                   0/200 failed — three runs
 ```
 
-Three problems, all the same problem wearing different clothes:
+Importantly, none of the failures produced an incorrect count. They returned 5xx and remained outside the buckets, which is the intended behaviour.
 
-1. DynamoDB reports a collision through two different exception types, and I was
-   only handling one of them. The other went straight to a 5xx with no retry.
-2. The ignored counter was written with no retry at all, while touching the
-   busiest row in the table.
-3. Underneath both, every update for an event was incrementing one row, so
-   updates for completely different athletes collided with each other.
+The concurrency case was also run independently: six revisions for one athlete fired simultaneously for twenty rounds. The final state was revision 6 every time, with accepted + ignored equal to the number sent.
 
-The retry policy now lives in one file that every writer shares, and the counters
-are spread across rows and added up on read. The tell for the last one was in the
-error itself: DynamoDB returns one cancellation reason per item, and the failing
-transaction listed two — while the accept path writes three. It was never the
-accept path failing at all.
+### Testing
 
-What matters more than any of those fixes: through every one of those failures,
-**not one update was ever miscounted**. They all came back as 5xx and landed in
-no bucket, which is the designed behaviour. The counters and the stored results
-agreed on every single run, including the broken ones. A design that guessed
-would have recorded those as "ignored", left results stuck at stale revisions,
-and still produced counters that balanced perfectly.
+Four layers cover different failure modes:
 
-Those numbers were re-confirmed after the final deploy, so they describe the
-build that is running now rather than an earlier one.
+* **Pure functions:** exhaustive ordering tests and validation variants.
+* **Stack assertions:** IAM permissions, alarm actions, API-key lifetime, concurrency configuration and submission outputs.
+* **Template snapshot:** catches unexpected synthesized-stack changes; generated asset hashes and key expiry are scrubbed.
+* **Deployed harness:** exercises the real AWS stack and found every runtime bug.
 
-The concurrency case is the one I would point at in an interview: six revisions
-for one athlete fired simultaneously, twenty rounds, and the final state is
-revision 6 every time. Anything from one to six of them is accepted depending on
-which lands first — if the newest wins the race, the other five are correctly
-ignored — and accepted plus ignored always equals what was sent.
+I deliberately broke the stack to verify the assertions: granting the read API write access, removing the alarm action, changing log retention and pointing the alarm at rejections were all caught.
 
-### How it is tested
+There are no handler unit tests. Mocking DynamoDB would test the mock rather than the real transaction behaviour; the deployed harness provides that coverage.
 
-Four layers, each catching something the others cannot.
+### Alternatives considered
 
-**Pure functions**, tested exhaustively rather than by example. The ordering rule
-is checked against all 720 arrival orders of six revisions; validation is checked
-against every corrupt variant of every field rule in the brief.
+**SQS:** The conditional write already provides idempotency. A queue would add redelivery semantics and potentially require a receipt ledger to distinguish retries from duplicates. It would become worthwhile if bursts approached DynamoDB write limits or the venue required network decoupling.
 
-**Stack assertions** pin the decisions that are cheap to get wrong and expensive
-to notice late: exactly one IAM policy carries table write permissions and it is
-the ingest function, the alarm actually notifies something, the API key outlives
-the assessment, no function carries reserved concurrency, and all four
-submission URLs are outputs.
+**Powertools Idempotency:** It deduplicates payloads and returns cached responses, which would make feed duplicates invisible to `updatesIgnored`. That solves a different problem from the brief.
 
-**A template snapshot** fails on any change to the synthesized stack at all,
-which is the point — it catches the change nobody thought to assert on. Asset
-hashes and the key expiry are scrubbed, since both move on every build.
+**Amplify `_version`:** The timing system owns revision ordering, so a store-generated version would introduce a second ordering source.
 
-**The deployed harness**, described above, because every real bug in this project
-was found there and nowhere else.
+**Separate deduplication table:** Another source of truth, and it would swallow duplicates that the brief requires us to count.
 
-I also checked the stack tests actually bite, by breaking the stack on purpose
-one change at a time — giving the read API write access, removing the alarm
-action, changing log retention, pointing the alarm at rejections — and confirming
-each was caught. A test that has never failed is not yet evidence of anything.
+**Stored `athletesTracked`:** Cheaper to read but vulnerable to drift under concurrency. Deriving it from rows keeps the value authoritative.
 
-There are deliberately no unit tests for the handler: mocking the DynamoDB client
-would test the mock, and the mock would have happily accepted the malformed
-transaction that broke every request on the first deploy.
-
-### Alternatives I considered and discounted
-
-**SQS between the endpoint and the processor.** The conditional write already
-makes processing idempotent, so a queue adds no correctness. It does add a
-redelivery path: a message redelivered after a successful commit would be counted
-as ignored a second time, and avoiding that needs a ledger of receipt ids, which
-is a second source of truth again. Without `ReportBatchItemFailures` one poison
-message also fails its whole batch and blocks good updates behind it, which rule
-3 explicitly forbids. What a queue would genuinely buy is absorbing a load spike
-and decoupling from the venue's network, and if the feed's burst rate ever
-approached the table's write limits I would put one in front.
-
-**Powertools' Idempotency utility.** It deduplicates on a payload hash and
-returns the cached response, which means a genuine feed duplicate would never
-reach `updatesIgnored` at all. The brief requires duplicates to be counted, not
-made invisible, so the utility solves a subtly different problem than the one I
-have.
-
-**Amplify-style `_version` optimistic locking.** Versions handed out by the store
-work when the store is the authority on ordering. Here the revision comes from
-the timing system, so the domain's own revision is the lock and a store-assigned
-version would just be a second, unrelated number.
-
-**A separate deduplication table.** Another source of truth to keep in step, and
-it would swallow exactly the duplicates the brief wants counted.
-
-**`athletesTracked` as a stored counter.** Cheaper to read and impossible to keep
-honest. A count cannot drift; a counter can, and under the concurrency that broke
-everything else it certainly would have.
-
-**AppSync JavaScript resolvers.** These were my first plan. Everything else here
-is TypeScript with tests that run locally in about a second, and APPSYNC_JS
-resolvers would have been untyped JavaScript testable only by calling AWS — the
-one untested corner of the project. The shaping `eventStats` needs is also four
-lines of ordinary code and an awkward response template. The cost of the Lambda I
-used instead is one more cold start and one more function competing for this
-account's concurrency, which at a race's volumes is not material.
+**AppSync JavaScript resolvers:** My first plan. The rest of the project is TypeScript and locally testable; `APPSYNC_JS` would introduce an untyped, AWS-dependent test path for a small amount of shaping logic. The Lambda adds a cold start but is immaterial at the expected race volume.
 
 ### Settled decisions
 
-Each of these is a decision rather than an oversight, so they are written down.
-
-| Question | Decision | Why |
-|---|---|---|
-| Rejection at the edge: 400 or 422? | 400 | Either is defensible. What matters is that the count is identical wherever the failure is caught |
-| Non-JSON, empty or array body | Corrupt, raw body stored | A corrupt payload may carry no `eventId` at all, which is why `updatesRejected` is pipeline-wide |
-| Extra unknown fields | Accepted, then dropped | The brief defines corruption field by field, so an extra field does not make a payload corrupt |
-| Whitespace-only `eventId` / `bib` | Corrupt | "Non-empty" read strictly, so `"   "` cannot create an athlete |
-| Surrounding whitespace | Trimmed, and the trimmed value is stored | Keeps one row per athlete. A padded bib does read back trimmed |
-| `lane` bounds | Any 32-bit integer | The brief requires only "integer", so I did not invent a positivity rule it does not state |
-| `timeMs` as `10105.0` | Accepted | Once parsed, JSON cannot distinguish it from `10105` |
-| Integer bounds | Rejected above 2^31−1 | GraphQL `Int` is 32-bit, and a larger value would break the read contract on the way out |
-| Oversized body | Rejected above 64 KB, before parsing | Parsing costs time in proportion to a body the feed controls |
-| Unit tests for the handler | Deliberately none | Mocking the DynamoDB client would test the mock. The deployed harness tests the real thing, and it is what found every real bug |
-| SDK retry attempts | Pinned to 1 on the client | The SDK's default of 3 would sit underneath the retry policy in `src/retry.ts`, making that file's stated worst case untrue. One attempt there means one policy, and the budget against the Lambda timeout is real. Transient connection errors now surface as 5xx and the feed re-sends |
-| Rejection payload TTL | 30 days, not 7 | The brief asks for the payload to be retrievable afterwards, and the review may be weeks after submission |
-| An unknown event | Zeros, `[]` and `0` — never null, never an error | Every one of those return types is non-null in the schema, so absence has to be a value |
-| Metric dimensions | None per event or per athlete | CloudWatch charges per unique metric-and-dimension combination, so an unbounded dimension turns a free metric into a growing bill. Those stay in the logs, which can be searched by athlete without being charged per athlete |
+| Question                          | Decision                          | Why                                                           |
+| --------------------------------- | --------------------------------- | ------------------------------------------------------------- |
+| Edge rejection: 400 or 422?       | 400                               | Either is defensible; the counting semantics matter more      |
+| Non-JSON, empty or array body     | Corrupt; raw body stored          | May have no `eventId`, so rejection counting is pipeline-wide |
+| Unknown fields                    | Accepted, then dropped            | Corruption is defined field-by-field                          |
+| Whitespace-only `eventId` / `bib` | Corrupt                           | Non-empty means genuinely non-empty                           |
+| Surrounding whitespace            | Trimmed before storage            | Prevents duplicate athlete rows                               |
+| `lane` bounds                     | Any 32-bit integer                | The brief only requires an integer                            |
+| `timeMs: 10105.0`                 | Accepted                          | JSON parsing cannot distinguish it from `10105`               |
+| Integer bounds                    | Reject above 2³¹−1                | Required by GraphQL `Int`                                     |
+| Oversized body                    | Reject above 64 KB before parsing | Avoids unnecessary parsing work                               |
+| Handler unit tests                | None                              | Real DynamoDB behaviour is covered by the deployed harness    |
+| SDK retry attempts                | 1                                 | Keeps retry behaviour centralised in `src/retry.ts`           |
+| Rejection TTL                     | 30 days                           | Review may occur weeks after submission                       |
+| Unknown event                     | Zeros, `[]`, and `0`              | Schema fields are non-null                                    |
+| Metric dimensions                 | None per event/athlete            | Avoids unbounded CloudWatch metric cardinality                |
 
 ---
 
 ## 3. AI assistance
 
-I used Claude Code throughout, for the boilerplate.
+I used Claude Code throughout for boilerplate and reviewed every generated line before committing or deploying.
 
-**What Claude wrote, at my direction:** the CDK stack in `lib/`, the app entry in
-`bin/`, the results page, the deployed harness and its fixtures, the stack
-assertion and snapshot tests, the snapshot recorder, and the `CLAUDE.md` and
-`CONTEXT.md` project notes that ship with this repo.
+**Claude-generated:** CDK stack in `lib/`, `bin/` entry point, results page, deployed harness and fixtures, stack assertions and snapshot tests, snapshot recorder, `CLAUDE.md`, and `CONTEXT.md`.
 
-**What I wrote myself:** everything in `src/` — `validate.ts` and `decide.ts` as
-pure functions, `applyValid.ts` with the conditional write, the transaction and
-the classification of what a cancellation actually means, `retry.ts`,
-`reject.ts`, `db.ts` and the two handlers — plus `schema.graphql`, the unit tests
-for the pure functions, the file-header comments, and this document.
+**Written by me:** everything in `src/`, including `validate.ts`, `decide.ts`, `applyValid.ts`, transaction/classification logic, `retry.ts`, `reject.ts`, `db.ts`, both handlers, `schema.graphql`, pure-function tests, file headers and this document.
 
-**Why there:** the split is between what is being assessed and what is
-well-trodden. The three processor rules and the counting are the exercise, and
-there is a 35-minute conversation at the end of it picking specific code apart,
-so writing that by hand was not optional. The CDK wiring, the page and the
-harness are mechanical — a table, a function, an HTTP route, a fetch and a
-shuffle — and having them written quickly is what left the time for load testing
-against the deployed stack, which is where every real bug turned out to be. I
-read every generated line before it was committed, and ran every deployment
-myself.
+The split was deliberate: the processor rules and counting logic are the assessment, while the CDK wiring, UI and harness are mechanical. Writing the latter quickly left time for the deployed load testing that found the real bugs.
 
-**Where it was wrong, and how I caught it:** my first version of the transaction
-declared an expression value it never used, which DynamoDB rejects outright —
-every post returned a 500 until it was deployed and tried, and a static
-compliance check I ran over the same code passed while it was broken. The three
-collision bugs in §2 are mine as well, and were found the same way. On Claude's
-side the failures were the ordinary ones: the generated stack targeted a Node
-runtime that is already deprecated, and used `logRetention`, which implements
-retention by deploying a second Lambda — in an account with a concurrency quota
-of 10, that is a function competing with the one doing the work. Both were caught
-at `cdk synth`, before anything was deployed.
+My first transaction implementation contained an unused expression value that DynamoDB rejected; every POST returned 500 until I deployed it. The collision bugs described above were also found through the deployed harness.
 
-The one place I would push back on my own choice is the stack tests. They pin the
-decisions I care most about — that only the ingest function can write, that the
-alarm notifies something, that no function carries a reserved concurrency — and I
-did not write them. A test I did not write, that has never failed, is evidence of
-nothing at all, which is why I went back and broke the stack on purpose one
-change at a time until each one caught what it claims to.
+Claude's generated stack also used a deprecated Node runtime and `logRetention`, which creates another Lambda. Both were caught by `cdk synth` before deployment.
 
-The lesson I would take from this exercise is the one I have already written into
-the file headers, and it applies to both halves of that split: verify against the
-deployed thing, not against the code as it reads.
+I did not write the stack assertion tests, so I deliberately broke the stack afterwards to verify that each test actually failed when its condition was violated.
+
+**The main lesson:** verify against the deployed system, not just the code as it reads.
