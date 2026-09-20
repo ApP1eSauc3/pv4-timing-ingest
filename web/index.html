@@ -1,5 +1,178 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
-<title>PV4 results</title>
-<h1>PV4 results</h1>
-<p><strong>TODO — page not implemented.</strong> See <code>lib/CONTEXT.md</code>.</p>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PV4 timing results</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #16181d; --muted: #5b6270; --line: #e3e6eb;
+    --panel: #f6f7f9; --accent: #1d4ed8;
+    --provisional: #b45309; --confirmed: #1d4ed8; --official: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12141a; --fg: #e8eaee; --muted: #9aa2b1; --line: #272b34;
+      --panel: #1a1d25; --accent: #7aa2f7;
+      --provisional: #f0b429; --confirmed: #7aa2f7; --official: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+  select, button {
+    font: inherit; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  select { min-width: 260px; }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; font-weight: 500; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 20px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .stat .value { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .status { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+  .PROVISIONAL { color: var(--provisional); }
+  .CONFIRMED { color: var(--confirmed); }
+  .OFFICIAL { color: var(--official); }
+  .note { color: var(--muted); font-size: 13px; margin-top: 16px; }
+  .error { color: #dc2626; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PV4 timing results</h1>
+  <p class="sub">Live ingest from the venue timing system. Results change while a race is adjudicated.</p>
+
+  <div class="controls">
+    <select id="events" aria-label="Event"><option>Loading…</option></select>
+    <button id="refresh" type="button">Refresh</button>
+    <span id="updated" class="sub" style="margin:0"></span>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <table>
+    <thead>
+      <tr><th>Lane</th><th>Bib</th><th class="num">Time</th><th>Status</th><th class="num">Rev</th></tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="5" class="note">Loading…</td></tr></tbody>
+  </table>
+  <p class="note" id="footnote">
+    Ordered by time. <strong>Rev</strong> is the revision number the timing system sent —
+    only a higher revision replaces a result, whatever status it carries.
+  </p>
+</main>
+
+<script>
+// Endpoint and key come from config.json, written at deploy time. Nothing is
+// hardcoded, so the same page works against any deployment of this stack.
+let config = null;
+
+const el = (id) => document.getElementById(id);
+const fmtTime = (ms) => {
+  const seconds = Math.floor(ms / 1000);
+  const rest = String(ms % 1000).padStart(3, '0');
+  return seconds >= 60
+    ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}.${rest}`
+    : `${seconds}.${rest}`;
+};
+
+async function query(body) {
+  const response = await fetch(config.graphqlUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': config.apiKey },
+    body: JSON.stringify({ query: body }),
+  });
+  const json = await response.json();
+  if (json.errors) throw new Error(json.errors.map((e) => e.message).join('; '));
+  return json.data;
+}
+
+async function loadEvents() {
+  const { events } = await query('{ events }');
+  const select = el('events');
+  const previous = select.value;
+
+  select.innerHTML = events.length
+    ? events.map((id) => `<option value="${id}">${id}</option>`).join('')
+    : '<option value="">No events yet — post an update to /timing</option>';
+
+  // Keep the current selection across a refresh, so watching one race does not
+  // jump to another when a new event appears.
+  if (events.includes(previous)) select.value = previous;
+  return select.value;
+}
+
+async function loadEvent(eventId) {
+  if (!eventId) {
+    el('stats').innerHTML = '';
+    el('rows').innerHTML = '<tr><td colspan="5" class="note">Nothing to show yet.</td></tr>';
+    return;
+  }
+
+  const data = await query(`{
+    results(eventId: "${eventId}") { bib lane revision status timeMs }
+    eventStats(eventId: "${eventId}") { athletesTracked updatesAccepted updatesIgnored }
+    updatesRejected
+  }`);
+
+  const stats = [
+    ['Athletes', data.eventStats.athletesTracked],
+    ['Accepted', data.eventStats.updatesAccepted],
+    ['Ignored', data.eventStats.updatesIgnored],
+    ['Rejected (all events)', data.updatesRejected],
+  ];
+  el('stats').innerHTML = stats
+    .map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`)
+    .join('');
+
+  const rows = [...data.results].sort((a, b) => a.timeMs - b.timeMs);
+  el('rows').innerHTML = rows.length
+    ? rows.map((r) => `<tr>
+        <td class="num">${r.lane}</td>
+        <td>${r.bib}</td>
+        <td class="num">${fmtTime(r.timeMs)}</td>
+        <td><span class="status ${r.status}">${r.status}</span></td>
+        <td class="num">${r.revision}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" class="note">No results for this event yet.</td></tr>';
+}
+
+async function refresh() {
+  const button = el('refresh');
+  button.disabled = true;
+  try {
+    const eventId = await loadEvents();
+    await loadEvent(eventId);
+    el('updated').textContent = `updated ${new Date().toLocaleTimeString()}`;
+    el('updated').classList.remove('error');
+  } catch (error) {
+    el('updated').textContent = error.message;
+    el('updated').classList.add('error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+el('refresh').addEventListener('click', refresh);
+el('events').addEventListener('change', (e) => loadEvent(e.target.value));
+
+fetch('config.json')
+  .then((r) => r.json())
+  .then((c) => { config = c; return refresh(); })
+  .catch(() => {
+    el('rows').innerHTML = '<tr><td colspan="5" class="error">Could not load config.json.</td></tr>';
+  });
+</script>
+</body>
+</html>

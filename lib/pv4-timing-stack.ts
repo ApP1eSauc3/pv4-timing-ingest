@@ -3,6 +3,13 @@ import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib/core';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as appsync from 'aws-cdk-lib/aws-appsync';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -64,6 +71,7 @@ export class Pv4TimingStack extends cdk.Stack {
         TABLE_NAME: table.tableName,
         POWERTOOLS_SERVICE_NAME: 'pv4-ingest',
         POWERTOOLS_LOG_LEVEL: 'INFO',
+        POWERTOOLS_METRICS_NAMESPACE: 'PV4/Timing',
       },
       logGroup,
       bundling: {
@@ -144,6 +152,71 @@ export class Pv4TimingStack extends cdk.Stack {
       });
     }
 
+    // ── Results page ───────────────────────────────────────────────────────
+    // Private bucket; only CloudFront can read it, through Origin Access
+    // Control. The bucket is never public.
+    const siteBucket = new s3.Bucket(this, 'SiteBucket', {
+      bucketName: `pv4-results-${this.account}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    const distribution = new cloudfront.Distribution(this, 'SiteDistribution', {
+      defaultRootObject: 'index.html',
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(siteBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        // The page re-queries on demand; caching the HTML would serve a stale
+        // page after a deploy. The data itself is never cached here — it comes
+        // from AppSync at request time.
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      },
+      comment: 'pv4 results page',
+    });
+
+    // The page reads its endpoint and key from config.json at runtime, so
+    // nothing is baked into the HTML and the same page works after a redeploy.
+    new s3deploy.BucketDeployment(this, 'SiteDeployment', {
+      destinationBucket: siteBucket,
+      sources: [
+        s3deploy.Source.asset(path.join(__dirname, '..', 'web')),
+        s3deploy.Source.jsonData('config.json', {
+          graphqlUrl: api.graphqlUrl,
+          apiKey: api.apiKey ?? '',
+        }),
+      ],
+      distribution,
+      distributionPaths: ['/*'],
+    });
+
+    // ── Alarms ─────────────────────────────────────────────────────────────
+    const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
+      topicName: 'pv4-alarms',
+      displayName: 'PV4 timing alarms',
+    });
+
+    // Errors, not rejections. A rejected update is NORMAL here — the brief says
+    // roughly one in ten arrives corrupt — so an alarm on rejections would fire
+    // on every race and be muted within a day, which is worse than no alarm.
+    // A Lambda error means the processor could not say what happened to an
+    // update, and that is never normal.
+    const errorAlarm = new cloudwatch.Alarm(this, 'IngestErrorAlarm', {
+      alarmName: 'pv4-ingest-errors',
+      alarmDescription:
+        'The ingest Lambda threw. An update reached the processor and landed in none of accepted, ignored or rejected.',
+      metric: ingestFn.metricErrors({ period: cdk.Duration.minutes(1), statistic: 'Sum' }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      // No traffic is not a problem; it is a race that has not started.
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    errorAlarm.addAlarmAction(new cwActions.SnsAction(alarmTopic));
+
     // ── Outputs ────────────────────────────────────────────────────────────
     // Printed by the stack so they don't have to be hunted in the console weeks
     // from now, when the submission asks for them.
@@ -160,6 +233,11 @@ export class Pv4TimingStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GraphqlApiKey', {
       value: api.apiKey ?? 'none',
       description: 'AppSync API key — meant to be shared, expires in 365 days',
+    });
+
+    new cdk.CfnOutput(this, 'ResultsPageUrl', {
+      value: `https://${distribution.distributionDomainName}`,
+      description: 'CloudFront results page',
     });
 
     new cdk.CfnOutput(this, 'TableName', { value: table.tableName });

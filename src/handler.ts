@@ -16,6 +16,7 @@
  */
 
 import { Logger } from '@aws-lambda-powertools/logger';
+import { MetricUnit, Metrics } from '@aws-lambda-powertools/metrics';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 
 import { applyValid } from './applyValid';
@@ -24,6 +25,17 @@ import { validateBody } from './validate';
 
 const logger = new Logger({ serviceName: 'pv4-ingest' });
 
+/**
+ * Metrics are emitted as EMF in the logs, so they cost nothing extra to publish.
+ *
+ * Deliberately NO per-event or per-bib dimensions. Metric cost is per unique
+ * combination of metric and dimension values, so a dimension that grows with the
+ * data — a bib, an event id — turns a free metric into an unbounded bill. Those
+ * belong in the log fields, where they already are, and where they can be
+ * queried without being charged per distinct value.
+ */
+const metrics = new Metrics({ namespace: 'PV4/Timing', serviceName: 'pv4-ingest' });
+
 const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
   statusCode,
   headers: { 'content-type': 'application/json' },
@@ -31,6 +43,10 @@ const json = (statusCode: number, body: unknown): APIGatewayProxyResultV2 => ({
 });
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  // Per invocation, so a warm container cannot carry the previous request's
+  // numbers into this one.
+  metrics.clearMetrics();
+
   // HTTP API always populates this. The fallback is only for a hand-crafted
   // test invocation that has no requestContext.
   const requestId = event.requestContext?.requestId ?? 'unknown';
@@ -55,6 +71,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       failedChecks: validation.failedChecks,
     });
 
+    metrics.addMetric('UpdatesRejected', MetricUnit.Count, 1);
+    metrics.publishStoredMetrics();
+
     return json(400, { outcome: 'REJECTED', failedChecks: validation.failedChecks });
   }
 
@@ -68,6 +87,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   const outcome = await applyValid(validation.update, requestId);
 
   logger.info(`update ${outcome.toLowerCase()}`, { ...context, outcome });
+
+  metrics.addMetric(outcome === 'ACCEPTED' ? 'UpdatesAccepted' : 'UpdatesIgnored', MetricUnit.Count, 1);
+  metrics.publishStoredMetrics();
 
   return json(200, { outcome });
 }

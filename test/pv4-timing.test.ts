@@ -6,6 +6,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as cdk from 'aws-cdk-lib/core';
 import { Template } from 'aws-cdk-lib/assertions';
 
@@ -124,4 +126,49 @@ test('the read API cannot write to the table', () => {
       assert.equal(policy.includes(write), false, `query function must not have ${write}`);
     }
   }
+});
+
+test('there is an alarm, and it is not on rejections', () => {
+  const { template } = synth();
+  template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    MetricName: 'Errors',
+    Namespace: 'AWS/Lambda',
+    TreatMissingData: 'notBreaching',
+  });
+
+  // The brief says ~1 in 10 updates arrives corrupt, so rejections are normal.
+  // An alarm on them would fire every race and be muted, which is worse than
+  // having no alarm at all.
+  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+  for (const alarm of alarms) {
+    const metric = (alarm as { Properties: { MetricName?: string } }).Properties.MetricName;
+    assert.notEqual(metric, 'UpdatesRejected', 'must not alarm on rejections');
+  }
+});
+
+test('the results bucket is private and served through CloudFront', () => {
+  const { template } = synth();
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    PublicAccessBlockConfiguration: {
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    },
+  });
+  template.resourceCountIs('AWS::CloudFront::Distribution', 1);
+  template.hasResourceProperties('AWS::CloudFront::Distribution', {
+    DistributionConfig: {
+      DefaultRootObject: 'index.html',
+      DefaultCacheBehavior: { ViewerProtocolPolicy: 'redirect-to-https' },
+    },
+  });
+});
+
+test('the page hardcodes no endpoint — it reads config.json at runtime', () => {
+  const page = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8');
+  assert.ok(page.includes("fetch('config.json')"), 'page must read its config at runtime');
+  assert.equal(/appsync-api|execute-api|da2-/.test(page), false, 'no endpoint or key may be baked into the page');
+  assert.equal(/eventId:\s*"WC26/.test(page), false, 'no event id may be hardcoded');
 });
