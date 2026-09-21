@@ -27,7 +27,7 @@ measured evidence. This file covers what it is and how to run it.
 | AppSync API key | `da2-jhxc54srifcidc7kjtkiocak5m` |
 | Results page | `https://d264dekl0xqfqc.cloudfront.net` |
 
-The API key is read-only and is meant to be shared — the read Lambda behind it is
+The API key is read-only and is meant to be shared. The read Lambda behind it is
 granted read access to the table and nothing else, so no query can change a
 result. It expires 365 days after deployment.
 
@@ -69,7 +69,7 @@ follow it backwards.
 post '{"eventId":"DEMO","bib":"AUS-1147","lane":3,"revision":2,"status":"OFFICIAL","timeMs":10102}'
 # {"outcome":"ACCEPTED"}
 post '{"eventId":"DEMO","bib":"AUS-1147","lane":3,"revision":3,"status":"PROVISIONAL","timeMs":10102}'
-# {"outcome":"ACCEPTED"}  — status moved backwards, revision did not
+# {"outcome":"ACCEPTED"}  (status moved backwards, revision did not)
 ```
 
 **A corrupt payload is rejected, and says why.** Every failing rule is reported,
@@ -113,7 +113,7 @@ attribute_not_exists(revision) OR revision < :rev
 ```
 
 If it holds, the update is newer and overwrites. If it fails, what is stored was
-already at least as new — which is what a duplicate and a late arrival both look
+already at least as new, which is what a duplicate and a late arrival both look
 like. There is no separate deduplication anywhere in this codebase.
 
 The condition never mentions `status`. That is what lets revision 4 `PROVISIONAL`
@@ -136,7 +136,7 @@ returns both, so `athletesTracked` is **counted from the rows** rather than stor
 as a number that can drift from the athletes it claims to count.
 
 Counters are spread over 25 rows and summed on read. That came out of load
-testing, not the plan — on a single row, updates for unrelated athletes collided
+testing, not the plan. On a single row, updates for unrelated athletes collided
 with each other.
 
 ### Counting
@@ -151,7 +151,7 @@ pipeline-wide, because a corrupt payload may not say which event it belonged to.
 
 ### Validation
 
-Strict by construction — a field is valid only if it is positively valid, so
+Strict by construction: a field is valid only if it is positively valid, so
 `"3"`, `3.5`, `"official"`, `null` and a missing field are all corrupt.
 `recordedAt` is stored but never validated and never ordered on, because it comes
 from timing hardware whose clock is not trustworthy.
@@ -194,7 +194,7 @@ results and counters, and re-queries without a reload.
 
 The endpoint and key come from a `config.json` written at deploy time, so nothing
 is baked into the HTML and the same page works against any deployment. A failed
-read is never mistakable for an event with no results — an expired key is named
+read is never mistakable for an event with no results. An expired key is named
 specifically, and any other failure clears the table and says so.
 
 ---
@@ -203,9 +203,9 @@ specifically, and any other failure clears the table and says so.
 
 | | |
 |---|---|
-| Logs | Structured JSON via Powertools. An accepted or ignored line carries `requestId`, `eventId`, `bib`, `revision`, `status` and `outcome` — enough to trace one athlete end to end. Retained one week |
+| Logs | Structured JSON via Powertools. An accepted or ignored line carries `requestId`, `eventId`, `bib`, `revision`, `status` and `outcome`, which is enough to trace one athlete end to end. Retained one week |
 | Metrics | `UpdatesAccepted`, `UpdatesIgnored`, `UpdatesRejected` in namespace `PV4/Timing`, published as EMF. No per-event or per-athlete dimensions: unbounded cardinality turns a free metric into a growing bill |
-| Alarms | `pv4-ingest-errors` — the ingest function's `Errors >= 1` over one minute. `pv4-ingest-volume` — its `Invocations >= 2000` over five minutes. Both to the `pv4-alarms` SNS topic |
+| Alarms | `pv4-ingest-errors` on the ingest function's `Errors >= 1` over one minute. `pv4-ingest-volume` on its `Invocations >= 2000` over five minutes. Both to the `pv4-alarms` SNS topic |
 
 The alarm watches errors rather than rejections on purpose. Roughly one update in
 ten arrives corrupt, so an alarm on rejections fires every race and gets muted,
@@ -227,7 +227,7 @@ aws sns subscribe --topic-arn <the pv4-alarms topic ARN> \
 ```
 bin/    CDK app entry, and the project=pv4 tag applied app-wide
 lib/    the stack, and the GraphQL schema
-src/    the processor — validation, ordering, writes, and the read API
+src/    the processor: validation, ordering, writes, and the read API
 test/   unit tests, stack tests, the template snapshot, and the deployed harness
 web/    the results page
 docs/   working notes behind DECISIONS.md
@@ -270,9 +270,9 @@ Four layers, each catching something the others cannot.
 | Layer | Tests | What it catches |
 |---|---|---|
 | Pure functions | `validate` 29, `decide` 8, `shapeStats` 8 | The ordering rule against all 720 arrival orders of six revisions; every corrupt variant of every field rule |
-| Stack assertions | `pv4-timing` 15, `stack-assertions` 9 | Decisions cheap to get wrong and expensive to notice late — only the ingest function can write, the alarm notifies something, the key outlives the assessment, every submission URL is an output |
+| Stack assertions | `pv4-timing` 15, `stack-assertions` 9 | Decisions cheap to get wrong and expensive to notice late: only the ingest function can write, the alarm notifies something, the key outlives the assessment, every submission URL is an output |
 | Schema | `schema` 14 | One test per line of the contract the graders' harness runs against |
-| Template snapshot | `stack-snapshot` 1 | Any change at all to the synthesized stack — including the one nobody thought to assert on |
+| Template snapshot | `stack-snapshot` 1 | Any change at all to the synthesized stack, including the one nobody thought to assert on |
 
 The stack tests were checked by breaking the stack on purpose, one change at a
 time, until each was seen to fail. A test that has never failed is not yet
@@ -285,11 +285,11 @@ every real bug in this project was found there and not locally:
 INGEST_URL=... GQL_URL=... GQL_KEY=... npm run harness
 ```
 
-It sends 200 updates across 8 athletes — shuffled, ~20% duplicates, ~10% corrupt,
-five requests in flight — then fires six revisions at one athlete simultaneously,
-twenty times over. It asserts both that the counters balance and that every
-athlete ended at their highest revision, because balanced is not the same as
-correct.
+It sends 200 updates across 8 athletes, shuffled, with ~20% duplicates and ~10%
+corrupt payloads, five requests in flight. It then fires six revisions at one
+athlete simultaneously, twenty times over. It asserts both that the counters
+balance and that every athlete ended at their highest revision, because balanced
+is not the same as correct.
 
 It writes to whatever stack you point it at, under a fresh event id per run.
 

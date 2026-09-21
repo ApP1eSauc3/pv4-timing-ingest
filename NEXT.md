@@ -1,195 +1,82 @@
 # If given more time
 
-Written 2026-09-21, after submission. This is a list of what I would do next and
-why, including the things a reviewer would be right to raise.
+Written 2026-09-21, after submission. This is what I would fix next, including issues a reviewer would reasonably raise.
 
-Nothing here is implemented except one item, marked *Done 2026-09-21* where it
-appears: an alarm on ingest volume, added because the endpoint is public and the
-repository is now public with it. The processor, the counting and the read
-contract — everything the brief actually asks about — are exactly as submitted.
+Nothing here is implemented except the ingest-volume alarm, marked *Committed 2026-09-21, not deployed*. The submitted processor, counting and read contract are unchanged.
 
-Where a claim rests on someone else's specification, it is linked. Where it rests
-on this codebase, the file and line are named.
+Where relevant, I link the external specification or name the code location.
 
 ---
 
 ## 1. Correctness
 
-**Bound revision jumps.** This is the gap I would fix first, and it is the one
-the brief does not ask about. Validation rejects malformed payloads, not wrong
-ones: `revision` must be an integer between 1 and 2,147,483,647
-(`src/validate.ts:27,57`), so a revision garbled to 2,000,000,000 is well-formed
-and is applied. Every genuine update for that athlete is then ignored, because
-4 is not greater than 2,000,000,000.
+**Bound revision jumps.** Validation rejects malformed revisions, but not absurdly large valid ones (`src/validate.ts:27,57`). A corrupt `revision: 2000000000` would be accepted and would effectively freeze that athlete for the rest of the meet.
 
-The lockout is not literally permanent — 147,483,647 values above the poisoned
-one would still be accepted — but no timing system will ever send one, so in
-practice that athlete is frozen for the rest of the meet. At roughly one update
-in ten arriving corrupt, some of that corruption will be shape-valid.
+I would reject revisions more than a configured step above the stored value, using a `ConditionCheck` in the same transaction rather than a separate read.
 
-I would reject any revision more than a configured step above the stored value
-and count it as rejected. That needs a read before the write, which the design
-deliberately avoids, so it belongs as a `ConditionCheck` in the same transaction
-rather than a separate `GetItem` — the condition becomes "greater than stored,
-and not more than N greater".
+**Keep an append-only history.** Results currently overwrite the latest-state row, leaving no audit trail for protests or corrections. I would write each accepted update to a history item in the same transaction and keep the current row as the read model.
 
-**Keep an append-only history.** Results are overwritten in place, so there is no
-audit trail for a protest and no way to see what a poisoned revision replaced. I
-would write each accepted update to a history item in the same transaction,
-keeping the latest-state row as the read model.
+This matches the ODF model, where messages are versioned, complete records that replace the previous version. [ODF Foundation Principles](https://odf.olympictech.org/2020-Tokyo/general/HTML/foundation/Foundation_Principles_body.htm)
 
-This is also how the Olympic Data Feed treats results: messages are versioned
-rather than mutated, and "results related messages are always full and complete
-messages and always replace the previous version"
-([ODF Foundation Principles](https://odf.olympictech.org/2020-Tokyo/general/HTML/foundation/Foundation_Principles_body.htm)).
-The current state is a projection; the messages are the record.
+**Add an operator override.** Provide a recorded way to reset or force an athlete's revision rather than editing DynamoDB manually. Corrections belong in the protocol and in the history.
 
-**Add an operator override.** A way to reset or force one athlete's revision,
-recorded in the history, so recovery never means editing DynamoDB by hand. ODF
-has a precedent worth copying: an erroneous message is corrected by sending an
-empty message with a matching header, and a `Note` element carries free-text
-explanation of why a result changed. Corrections are part of the protocol rather
-than an out-of-band repair.
+**Fix the ignored-counter gap.** Already disclosed in `DECISIONS.md`: the ignored counter is a second write after the transaction is cancelled, so a crash between the two can leave it one short.
 
-**Revisit the ignored-counter gap.** Already disclosed in `DECISIONS.md`: the
-increment is a second write, because the transaction it belonged to has already
-been cancelled, and a crash between the two leaves `updatesIgnored` one short.
+`ClientRequestToken` does not solve this. It only makes `TransactWriteItems` idempotent for ten minutes, and the counter update is a separate `UpdateItem`. [DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
 
-I would not claim `ClientRequestToken` closes it. That token makes a
-`TransactWriteItems` call idempotent for ten minutes after it finishes
-([DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)),
-and the ignored-counter write is a plain `UpdateItem` outside any transaction.
-The increment also cannot be folded into the original transaction, because it
-must happen *because* that transaction was cancelled.
+I would make the counter write its own transaction: condition on the stored revision still being at least the incoming revision, then increment with a token derived from `(eventId, bib, revision)`. Whether the extra write is worthwhile depends on the actual resend interval.
 
-What would genuinely help: make the second write a `TransactWriteItems` of its
-own — a `ConditionCheck` that the stored revision is still at least the incoming
-one, plus the counter `Update` — with a client token derived from
-`(eventId, bib, revision)`. A re-send inside ten minutes then counts once even if
-the first attempt's outcome was never observed. Outside ten minutes it is counted
-again on a path where today it is not counted at all, so the bound changes shape
-rather than disappearing. Whether that is worth the extra write is a judgement I
-would want to make with a measured re-send interval, not a guess.
-
-**Decide on lane changes.** Currently the latest applied value is stored
-silently, because the brief states lane is fixed and gives no rule for what to do
-when it is not. A changed lane is far more likely corruption than reality, so I
-would at minimum log it at `warn` and surface it as a metric. Rejecting the
-update outright would be wrong: the lane is not the ordering signal, and
-discarding a newer time because its lane looks odd is the failure the brief
-cares about.
+**Decide on lane changes.** The brief fixes lane and gives no behaviour for changes. I would at least log unexpected changes at `warn` and expose a metric. I would not reject them, because lane is not the ordering signal.
 
 ---
 
 ## 2. Testing
 
-**Handler tests against DynamoDB Local.** This is the critique I would rate most
-likely to land, and I agree with it. All three real bugs lived in the write path,
-and "mocking tests the mock" only holds for the happy path. A fake that raises a
-real `TransactionCanceledException` carrying `CancellationReasons` is not a mock
-of my logic — it is the input my logic exists to classify.
+**Test the handler against DynamoDB Local.** This is the critique I would most expect and agree with. The real bugs are in the write path, and mocks cannot prove the DynamoDB failure semantics.
 
-Both shapes need covering, because DynamoDB reports contention two different
-ways: an item-level rejection raises `TransactionConflictException`, while a
-rejection inside a transaction raises `TransactionCanceledException` with a
-positional `CancellationReasons` list — and for that second one, AWS SDKs do not
-retry the request
-([DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)).
-This client pins `maxAttempts: 1` anyway (`src/db.ts:38`), so the policy in
-`src/retry.ts` is the only one in play.
-`src/applyValid.ts:39,50,59` distinguishes them today with no test that proves
-it. DynamoDB Local gives real semantics offline, which the deployed harness
-cannot do in CI.
+Both contention shapes need coverage:
 
-**CI on every push.** A GitHub Action running `npm test` — the unit tests, the
-stack assertions and the template snapshot. All of it runs offline in about
-thirteen seconds, so there is no reason it is not already there except time.
+* `TransactionConflictException` for item-level contention.
+* `TransactionCanceledException` with positional `CancellationReasons` for transaction failures.
 
-**Heavier load testing.** Three clean runs of 200 updates at five in flight is
-600 requests. That bounds the failure rate loosely — below roughly half a percent
-at that concurrency — and races are bursty, so it shows contention was low in the
-test rather than that it stays low. I would run higher concurrency with bursty
-arrival and report failure rates with their sample sizes.
+AWS does not retry the latter, and this client already pins `maxAttempts: 1` (`src/db.ts:38`), which makes `src/retry.ts` the only retry policy. `src/applyValid.ts:39,50,59` distinguishes the cases without tests proving it. [DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
 
-Correctness does not depend on the answer: a 5xx is counted in no bucket and the
-feed re-sends. What the number tells you is how often the feed has to.
+**CI on every push.** Run `npm test` in GitHub Actions. Unit tests, stack assertions and the template snapshot all run offline in about 13 seconds.
+
+**Heavier load testing.** The current three 200-update runs at five concurrent requests come to only 600 requests. I would test higher, burstier concurrency and report failure rates with sample sizes.
+
+A 5xx is still safe, because it is counted in no bucket and the feed re-sends. The useful metric is how often that happens.
 
 ---
 
 ## 3. Operations
 
-**Protect the ingest endpoint.** It is public and unauthenticated — anyone who
-reads this repo can post timing updates into it. That is the one weakness the
-submitted `DECISIONS.md` does not list, and it should have.
+**Protect the ingest endpoint.** It is public and unauthenticated. Anyone who reads this repository can post timing updates to it.
 
-For an assessment it is acceptable, because the graders have to be able to post
-to it without credentials. For anything real it would sit behind IAM auth or a
-shared secret.
+That is acceptable for the assessment because graders need to reach it. For real use: IAM auth or a shared secret, throttling and a WAF rate-based rule.
 
-*Done 2026-09-21, and the one exception to this file being unimplemented:* a
-`pv4-ingest-volume` alarm on the ingest function's invocation count, 2000 over
-five minutes, to the same SNS topic. Detection rather than protection, chosen
-deliberately over stage-level throttling: a throttle returns 429 at the edge
-([API Gateway throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html)),
-and a request rejected there never reaches the processor, so it lands in none of
-the three buckets — the same blind spot the first concession in `DECISIONS.md`
-describes, but self-inflicted and on a far tighter limit. Silently dropping a
-grader's harness traffic is a worse failure than being paged about traffic that
-turns out to be theirs.
+The Lambda account concurrency quota was 10 when this was built, which made an open endpoint particularly concerning. It is now 1000, with 1000 unreserved, so that specific risk has changed, but the endpoint should still be protected.
 
-Still to do, and what I would add for anything real: throttling once nobody is
-grading it, IAM auth or a shared secret, and a WAF rate-based rule for per-IP
-blocking.
+**Ingest-volume alarm, committed 2026-09-21, not deployed.** `pv4-ingest-volume` watches invocation count and alerts at 2000 over five minutes via the existing SNS topic.
 
-One correction to my own earlier reasoning: the account's Lambda concurrency
-quota was 10 when this was built, which is what made an open endpoint alarming.
-Measured 2026-09-21 it is 1000, the AWS default, with 1000 unreserved. The
-endpoint should still be throttled; the account is no longer one burst away from
-starving everything else in the region.
+I chose detection over API Gateway throttling because throttled requests return 429 before reaching the processor and therefore disappear from all three counters. [API Gateway throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html)
 
-**Alarm on contention, not just on errors.** DynamoDB publishes a
-`TransactionConflict` metric that increments per failed item-level request
-([DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)).
-The stack does not watch it. Rising conflicts are the early signal that the 25
-counter shards are no longer enough — the condition that produced every 5xx
-during load testing — and unlike a load test it measures the real thing under
-real traffic.
+**Alarm on contention.** DynamoDB exposes `TransactionConflict`. It should be monitored because rising conflicts are the early signal that the 25 counter shards are no longer enough. [DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
 
-**Mark test traffic.** A test-versus-production flag on each update, so harness
-runs can never mix with real results. Today the harness uses a fresh event id per
-run, which keeps counters honest but still leaves ten `HARNESS-*` events in the
-`events` list a grader sees.
+**Mark test traffic.** Add an explicit test/production flag so harness traffic can never mix with real results. Fresh event IDs keep counters honest today, but do not distinguish the events themselves.
 
-**Confirm the alarm subscription.** The SNS topic still has no confirmed
-subscriber, so the alarm notifies nobody. One command, in the README, and a
-click.
+**Confirm the SNS subscription.** The topic currently has no confirmed subscriber, so the alarm notifies nobody.
 
 ---
 
 ## 4. Production path
 
-**Richer event identity.** `eventId` is opaque here. ODF identifies a unit with
-an RSC code that encodes "the discipline, gender, event, phase and unit", so a
-heat, a semi-final and a final are distinct identities rather than one event id
-that something upstream has to disambiguate
-([ODF Foundation Principles](https://odf.olympictech.org/2020-Tokyo/general/HTML/foundation/Foundation_Principles_body.htm)).
-Keying on event plus phase would match how the rest of the industry addresses
-results.
+**Richer event identity.** `eventId` is opaque. ODF identifies results using an RSC code containing discipline, gender, event, phase and unit. Event plus phase would avoid relying on upstream disambiguation. [ODF Foundation Principles](https://odf.olympictech.org/2020-Tokyo/general/HTML/foundation/Foundation_Principles_body.htm)
 
-**Validate at the source.** Timing systems handle corruption with redundant
-timing — beam plus backup camera — and official sign-off, and ODF carries a
-`ResultStatus` progression (`START_LIST`, `INTERMEDIATE`, `LIVE`, `UNCONFIRMED`,
-`UNOFFICIAL`, `OFFICIAL`, `PARTIAL`) that is richer than the brief's three
-values. Plausibility belongs as close to the hardware as possible. Ingest
-validation is the backstop, not the primary defence.
+**Validate at the source.** Real timing systems use redundant timing and official sign-off. ODF also has a richer `ResultStatus` progression than this brief. Ingest validation should remain the backstop, not the primary defence.
 
-ODF also orders on a monotonic `Version` — "sequential number with the highest
-indicating the most recent version" — and not on result status, which is the
-same separation this processor makes.
+ODF orders versions using a monotonic `Version`, separate from result status, which is the same separation used here.
 
-**Add a queue when volume justifies it.** SQS or a stream in front of the
-processor once bursts approach DynamoDB's write limits or the venue needs
-decoupling from the network. Worth remembering that a transaction consumes
-capacity for every item twice, to prepare and to commit, and consumes it even
-when the transaction is cancelled — so an ignored duplicate is not free. The
-conditional write stays authoritative either way.
+**Add a queue when volume justifies it.** Put SQS or a stream in front of the processor once bursts approach DynamoDB limits or the venue needs network decoupling.
+
+A DynamoDB transaction consumes capacity for every item twice and still consumes it when cancelled, so ignored duplicates are not free. The conditional write remains authoritative either way.
