@@ -168,11 +168,9 @@ timing — beam plus backup camera — and official sign-off, and ODF carries a
 values. Plausibility belongs as close to the hardware as possible. Ingest
 validation is the backstop, not the primary defence.
 
-Worth noting that ODF orders on a monotonic `Version` — "sequential number with
-the highest indicating the most recent version" — and not on result status,
-which is the same decision this processor makes for the same reason. That the
-industry standard separates the two is the strongest argument I have that the
-design is right.
+ODF also orders on a monotonic `Version` — "sequential number with the highest
+indicating the most recent version" — and not on result status, which is the
+same separation this processor makes.
 
 **Add a queue when volume justifies it.** SQS or a stream in front of the
 processor once bursts approach DynamoDB's write limits or the venue needs
@@ -180,12 +178,3 @@ decoupling from the network. Worth remembering that a transaction consumes
 capacity for every item twice, to prepare and to commit, and consumes it even
 when the transaction is cancelled — so an ignored duplicate is not free. The
 conditional write stays authoritative either way.
-
----
-
-## What I would not change
-
-The conditional write. Every alternative considered in `DECISIONS.md` adds a
-second source of truth, and the one place the industry standard is explicit —
-order on a monotonic version, never on status — is the place this design already
-agrees with it.
