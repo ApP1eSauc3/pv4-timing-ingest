@@ -1232,6 +1232,40 @@
         "Threshold": 1,
         "TreatMissingData": "notBreaching"
       }
+    },
+    "IngestVolumeAlarmA4C42876": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9"
+          }
+        ],
+        "AlarmDescription": "Unusual ingest volume. The endpoint is public, so this is the signal that someone other than the timing feed found it.",
+        "AlarmName": "pv4-ingest-volume",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "IngestFunction4B2F2EB2"
+            }
+          }
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "Invocations",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "project",
+            "Value": "pv4"
+          }
+        ],
+        "Threshold": 2000,
+        "TreatMissingData": "notBreaching"
+      }
     }
   },
   "Outputs": {

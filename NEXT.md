@@ -1,8 +1,12 @@
 # If given more time
 
-Written 2026-09-21, after submission. Nothing below is implemented; the submitted
-design is unchanged. This is a list of what I would do next and why, including
-the things a reviewer would be right to raise.
+Written 2026-09-21, after submission. This is a list of what I would do next and
+why, including the things a reviewer would be right to raise.
+
+Nothing here is implemented except one item, marked *Done 2026-09-21* where it
+appears: an alarm on ingest volume, added because the endpoint is public and the
+repository is now public with it. The processor, the counting and the read
+contract — everything the brief actually asks about — are exactly as submitted.
 
 Where a claim rests on someone else's specification, it is linked. Where it rests
 on this codebase, the file and line are named.
@@ -120,11 +124,22 @@ submitted `DECISIONS.md` does not list, and it should have.
 
 For an assessment it is acceptable, because the graders have to be able to post
 to it without credentials. For anything real it would sit behind IAM auth or a
-shared secret. In the meantime, stage-level throttling on the HTTP API caps both
-the sustained rate and the burst, and returns 429 above it
-([API Gateway throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html)) —
-a few lines of CDK, and it bounds the blast radius without breaking the
-assessment. A WAF rate-based rule would add per-IP blocking.
+shared secret.
+
+*Done 2026-09-21, and the one exception to this file being unimplemented:* a
+`pv4-ingest-volume` alarm on the ingest function's invocation count, 2000 over
+five minutes, to the same SNS topic. Detection rather than protection, chosen
+deliberately over stage-level throttling: a throttle returns 429 at the edge
+([API Gateway throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html)),
+and a request rejected there never reaches the processor, so it lands in none of
+the three buckets — the same blind spot the first concession in `DECISIONS.md`
+describes, but self-inflicted and on a far tighter limit. Silently dropping a
+grader's harness traffic is a worse failure than being paged about traffic that
+turns out to be theirs.
+
+Still to do, and what I would add for anything real: throttling once nobody is
+grading it, IAM auth or a shared secret, and a WAF rate-based rule for per-IP
+blocking.
 
 One correction to my own earlier reasoning: the account's Lambda concurrency
 quota was 10 when this was built, which is what made an open endpoint alarming.

@@ -112,10 +112,17 @@ calling AWS. Reasons in full at the top of `src/queryHandler.ts`.
   `UpdatesRejected` — one per outcome, and nothing else (`src/handler.ts:72,89`).
   **No per-event or per-bib dimensions** — unbounded cardinality turns a free
   metric into a growing bill, and those values are already in the logs.
-- One alarm, `pv4-ingest-errors`: the ingest function's `Errors >= 1` over a
-  one-minute period, actioned to the `pv4-alarms` SNS topic
-  (`lib/pv4-timing-stack.ts:205-217`). No metric-math alarm on the rejection
-  rate was built — it was considered and left out.
+- Two alarms, both actioned to the `pv4-alarms` SNS topic. `pv4-ingest-errors`
+  on the ingest function's `Errors >= 1` over one minute: the processor could
+  not say what happened to an update. `pv4-ingest-volume` on its
+  `Invocations >= 2000` over five minutes: the endpoint is public, so volume is
+  the signal that somebody other than the timing feed found it. Watched rather
+  than throttled — a 429 is returned at the edge and never reaches the
+  processor, so a throttled request is counted nowhere, and silently dropping a
+  grader's traffic is worse than being told about traffic that turns out to be
+  theirs. A full harness run is 320 requests, so the threshold clears six back
+  to back. Reasoning, including why not anomaly detection, is at the alarm.
+- No metric-math alarm on the rejection rate was built — considered, left out.
 
 ```
 // ❌ alarms on raw rejected count — the brief says ~10% corrupt is NORMAL,

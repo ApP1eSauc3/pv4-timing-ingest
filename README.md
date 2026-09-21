@@ -205,7 +205,7 @@ specifically, and any other failure clears the table and says so.
 |---|---|
 | Logs | Structured JSON via Powertools. An accepted or ignored line carries `requestId`, `eventId`, `bib`, `revision`, `status` and `outcome` — enough to trace one athlete end to end. Retained one week |
 | Metrics | `UpdatesAccepted`, `UpdatesIgnored`, `UpdatesRejected` in namespace `PV4/Timing`, published as EMF. No per-event or per-athlete dimensions: unbounded cardinality turns a free metric into a growing bill |
-| Alarm | `pv4-ingest-errors` — the ingest function's `Errors >= 1` over one minute, to the `pv4-alarms` SNS topic |
+| Alarms | `pv4-ingest-errors` — the ingest function's `Errors >= 1` over one minute. `pv4-ingest-volume` — its `Invocations >= 2000` over five minutes. Both to the `pv4-alarms` SNS topic |
 
 The alarm watches errors rather than rejections on purpose. Roughly one update in
 ten arrives corrupt, so an alarm on rejections fires every race and gets muted,

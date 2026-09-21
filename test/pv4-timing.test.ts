@@ -128,11 +128,22 @@ test('the read API cannot write to the table', () => {
   }
 });
 
-test('there is an alarm, and it is not on rejections', () => {
+test('there are two alarms, and neither is on rejections', () => {
   const { template } = synth();
-  template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+  template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
+
+  // Errors: the processor could not say what happened to an update.
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     MetricName: 'Errors',
+    Namespace: 'AWS/Lambda',
+    TreatMissingData: 'notBreaching',
+  });
+
+  // Invocations: the endpoint is public, so volume is the signal that someone
+  // other than the timing feed found it. Watched rather than throttled, because
+  // a 429 at the edge never reaches the processor and so is counted nowhere.
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    MetricName: 'Invocations',
     Namespace: 'AWS/Lambda',
     TreatMissingData: 'notBreaching',
   });

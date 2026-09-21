@@ -216,6 +216,39 @@ export class Pv4TimingStack extends cdk.Stack {
 
     errorAlarm.addAlarmAction(new cwActions.SnsAction(alarmTopic));
 
+    // On volume, because the ingest endpoint is public and unauthenticated -
+    // anyone holding the URL can post to it. This watches for that rather than
+    // throttling it: a throttle returns 429 at the edge, and a request rejected
+    // there never reaches the processor and so lands in none of accepted,
+    // ignored or rejected. Silently dropping a grader's traffic is a worse
+    // failure than being told about traffic that turns out to be theirs.
+    //
+    // 2000 in five minutes is about 6.7 requests a second sustained. A full
+    // harness run is 320 requests (200 volume + 20 rounds of 6), so six runs
+    // back to back stay under it, while anything scripted clears it easily.
+    //
+    // A static threshold rather than CloudWatch anomaly detection, which is the
+    // usual answer for "unusual volume" and is available as AnomalyDetectionAlarm
+    // in this CDK version. Three reasons it is wrong here: the model takes up to
+    // two weeks to train and this stack is days old and will be torn down; the
+    // only traffic it would train on is harness runs, so it would learn that
+    // floods are normal; and it bills per alarm, which the rest of this stack's
+    // observability deliberately avoids. Anomaly detection suits a behavioural
+    // baseline. This is a hard ceiling, which is what a static threshold is for.
+    const volumeAlarm = new cloudwatch.Alarm(this, 'IngestVolumeAlarm', {
+      alarmName: 'pv4-ingest-volume',
+      alarmDescription:
+        'Unusual ingest volume. The endpoint is public, so this is the signal that someone other than the timing feed found it.',
+      metric: ingestFn.metricInvocations({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
+      threshold: 2000,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      // A quiet endpoint is the normal state between races.
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    volumeAlarm.addAlarmAction(new cwActions.SnsAction(alarmTopic));
+
     // ── Outputs ────────────────────────────────────────────────────────────
     // Printed by the stack, so they are not hunted for in the console weeks
     // later when the submission needs them.

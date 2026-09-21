@@ -64,13 +64,25 @@ test('only the ingest function may write to the table', () => {
   );
 });
 
-test('the alarm notifies an SNS topic', () => {
+test('every alarm notifies an SNS topic', () => {
   const { template } = build();
   template.resourceCountIs('AWS::SNS::Topic', 1);
-  // An alarm with no action is a light nobody is looking at.
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmActions: Match.arrayWith([Match.objectLike({ Ref: Match.stringLikeRegexp('AlarmTopic') })]),
-  });
+
+  // An alarm with no action is a light nobody is looking at. Asserted for every
+  // alarm rather than for one of them, so adding a third cannot quietly ship
+  // without a destination.
+  const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+  assert.ok(alarms.length >= 1, 'no alarms found — this test would pass vacuously');
+
+  for (const alarm of alarms) {
+    const { AlarmName, AlarmActions } = (
+      alarm as { Properties: { AlarmName?: string; AlarmActions?: unknown[] } }
+    ).Properties;
+    assert.ok(
+      AlarmActions && AlarmActions.length > 0,
+      `${AlarmName ?? 'an alarm'} has no alarm action`,
+    );
+  }
 });
 
 test('the four resolvers all use the query Lambda as their data source', () => {
