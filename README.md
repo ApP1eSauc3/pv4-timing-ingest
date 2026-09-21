@@ -104,7 +104,7 @@ curl -s -H "x-api-key: $GQL_KEY" -H 'content-type: application/json' \
 | 2 | `handler.ts` | decode → size check → parse → validate. Nothing touches the database until validation passes |
 | 3 | `applyValid.ts` | One conditional `TransactWriteItems`: the result, the accepted counter and the event registry, together or not at all |
 | 4 | `applyValid.ts` | Classify the outcome. A failed condition is `IGNORED`; a write collision is retried; anything else throws |
-| 5 | response | `200 {"outcome":"ACCEPTED"|"IGNORED"}`, `400 {"outcome":"REJECTED", …}`, or a 5xx that counts nothing |
+| 5 | response | `200 {"outcome":"ACCEPTED"}` or `{"outcome":"IGNORED"}`; `400 {"outcome":"REJECTED", …}`; or a 5xx that counts nothing |
 
 ### Ordering and idempotency are one condition
 
